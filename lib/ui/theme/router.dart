@@ -1,0 +1,857 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../core/crypto/identity_manager.dart';
+import '../../core/crypto/prekey_manager.dart';
+import '../../core/crypto/session_manager.dart';
+import '../../core/models/contact.dart';
+import '../../core/models/conversation.dart';
+import '../../core/storage/secure_database.dart';
+import '../../services/message_service.dart';
+import '../../services/network/relay_service.dart';
+import '../screens/chat_screen.dart';
+import '../screens/conversation_list_screen.dart';
+import 'app_theme.dart';
+
+class SpectreServices {
+  const SpectreServices({
+    required this.identityManager,
+    required this.database,
+    required this.hasIdentity,
+    required this.onInitiate,
+    required this.onWiped,
+    this.currentUserId,
+    this.preKeyManager,
+    this.sessionManager,
+    this.relayService,
+    this.messageService,
+    this.relayUrl,
+  });
+
+  final IdentityManager identityManager;
+  final SecureDatabase database;
+  final bool hasIdentity;
+  final VoidCallback onInitiate;
+  final VoidCallback onWiped;
+
+  final String? currentUserId;
+  final PreKeyManager? preKeyManager;
+  final SessionManager? sessionManager;
+  final RelayService? relayService;
+  final MessageService? messageService;
+  final Uri? relayUrl;
+}
+
+class RouteExtras {
+  const RouteExtras({
+    required this.services,
+    this.conversation,
+    this.contact,
+  });
+
+  final SpectreServices services;
+  final Conversation? conversation;
+  final Contact? contact;
+}
+
+GoRouter buildSpectreRouter({required SpectreServices services}) {
+  final initialExtras = RouteExtras(services: services);
+
+  return GoRouter(
+    initialLocation: services.hasIdentity ? '/conversations' : '/onboarding',
+    initialExtra: initialExtras,
+    debugLogDiagnostics: false,
+    redirect: (BuildContext ctx, GoRouterState state) {
+      final loc = state.uri.path;
+      final onboarding = loc == '/onboarding';
+
+      if (!services.hasIdentity && !onboarding) return '/onboarding';
+      if (services.hasIdentity && onboarding) return '/conversations';
+      return null;
+    },
+    routes: <RouteBase>[
+      GoRoute(
+        path: '/onboarding',
+        pageBuilder: (ctx, state) => _fadePage(
+          key: state.pageKey,
+          child: _OnboardingScreen(
+            services: _readExtras(state, services).services,
+          ),
+        ),
+      ),
+      GoRoute(
+        path: '/conversations',
+        pageBuilder: (ctx, state) {
+          final svc = _readExtras(state, services).services;
+          return _fadePage(
+            key: state.pageKey,
+            child: ConversationListScreen(
+              messageService: svc.messageService!,
+              database: svc.database,
+              currentUserId: svc.currentUserId!,
+              onOpenConversation: (Conversation c) {
+                ctx.push(
+                  '/chat/${c.id}',
+                  extra: RouteExtras(services: svc, conversation: c),
+                );
+              },
+              onWiped: svc.onWiped,
+            ),
+          );
+        },
+      ),
+      GoRoute(
+        path: '/chat/:conversationId',
+        pageBuilder: (ctx, state) {
+          final extras = _readExtras(state, services);
+          final svc = extras.services;
+          final conversationId = state.pathParameters['conversationId']!;
+          return _fadePage(
+            key: state.pageKey,
+            child: _ChatRouteResolver(
+              services: svc,
+              conversationId: conversationId,
+              prefetched: extras.conversation,
+            ),
+          );
+        },
+      ),
+      GoRoute(
+        path: '/contact/:userId',
+        pageBuilder: (ctx, state) {
+          final extras = _readExtras(state, services);
+          final userId = state.pathParameters['userId']!;
+          return _fadePage(
+            key: state.pageKey,
+            child: _ContactScreen(
+              services: extras.services,
+              userId: userId,
+              prefetched: extras.contact,
+            ),
+          );
+        },
+      ),
+      GoRoute(
+        path: '/settings',
+        pageBuilder: (ctx, state) => _fadePage(
+          key: state.pageKey,
+          child: _SettingsScreen(
+            services: _readExtras(state, services).services,
+          ),
+        ),
+      ),
+    ],
+    errorPageBuilder: (ctx, state) => _fadePage(
+      key: state.pageKey,
+      child: _RouteErrorScreen(message: 'no route :: ${state.uri.path}'),
+    ),
+  );
+}
+
+RouteExtras _readExtras(GoRouterState state, SpectreServices fallback) {
+  final e = state.extra;
+  if (e is RouteExtras) return e;
+  return RouteExtras(services: fallback);
+}
+
+Page<T> _fadePage<T>({required Widget child, LocalKey? key}) {
+  return CustomTransitionPage<T>(
+    key: key,
+    child: child,
+    transitionDuration: const Duration(milliseconds: 220),
+    reverseTransitionDuration: const Duration(milliseconds: 160),
+    transitionsBuilder: (ctx, animation, secondaryAnimation, child) {
+      return FadeTransition(opacity: animation, child: child);
+    },
+  );
+}
+
+class _ChatRouteResolver extends StatefulWidget {
+  const _ChatRouteResolver({
+    required this.services,
+    required this.conversationId,
+    required this.prefetched,
+  });
+
+  final SpectreServices services;
+  final String conversationId;
+  final Conversation? prefetched;
+
+  @override
+  State<_ChatRouteResolver> createState() => _ChatRouteResolverState();
+}
+
+class _ChatRouteResolverState extends State<_ChatRouteResolver> {
+  Conversation? _conversation;
+  bool _loading = true;
+  Object? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.prefetched != null) {
+      _conversation = widget.prefetched;
+      _loading = false;
+    } else {
+      _resolve();
+    }
+  }
+
+  Future<void> _resolve() async {
+    try {
+      final db = await widget.services.database.open();
+      final rows = await db.query(
+        'conversations',
+        where: 'id = ?',
+        whereArgs: <Object>[widget.conversationId],
+        limit: 1,
+      );
+      if (!mounted) return;
+      setState(() {
+        _conversation = rows.isEmpty
+            ? null
+            : Conversation.fromMap(
+                Map<String, Object?>.from(rows.first),
+              );
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e;
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const _RouteLoadingScreen(label: '[ resolving session… ]');
+    }
+    if (_error != null || _conversation == null) {
+      return _RouteErrorScreen(
+        message: 'conversation ${widget.conversationId} not found',
+      );
+    }
+    final c = _conversation!;
+    final svc = widget.services;
+    return ChatScreen(
+      conversationId: c.id,
+      recipientId: c.recipientId,
+      currentUserId: svc.currentUserId!,
+      messageService: svc.messageService!,
+      database: svc.database,
+    );
+  }
+}
+
+class _RouteLoadingScreen extends StatelessWidget {
+  const _RouteLoadingScreen({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: SpectreColors.blackDeep,
+      body: NoiseBackground(
+        child: Center(
+          child: Text(
+            label,
+            style: SpectreTypography.caption().copyWith(
+              color: SpectreColors.textDim,
+              letterSpacing: 3,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RouteErrorScreen extends StatelessWidget {
+  const _RouteErrorScreen({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: SpectreColors.blackDeep,
+      appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, size: 20),
+          onPressed: () => Navigator.of(context).maybePop(),
+        ),
+        title: Text(
+          'ROUTE FAULT',
+          style: SpectreTypography.danger().copyWith(letterSpacing: 4),
+        ),
+      ),
+      body: NoiseBackground(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const DashedDivider(color: SpectreColors.redDanger),
+              const SizedBox(height: 16),
+              Text(
+                message,
+                style: SpectreTypography.mono().copyWith(
+                  color: SpectreColors.textCold,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OnboardingScreen extends StatefulWidget {
+  const _OnboardingScreen({required this.services});
+
+  final SpectreServices services;
+
+  @override
+  State<_OnboardingScreen> createState() => _OnboardingScreenState();
+}
+
+class _OnboardingScreenState extends State<_OnboardingScreen> {
+  bool _busy = false;
+  Object? _err;
+
+  Future<void> _initiate() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _err = null;
+    });
+    try {
+      await widget.services.identityManager.loadOrCreate();
+      widget.services.onInitiate();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _err = e;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: SpectreColors.blackDeep,
+      body: NoiseBackground(
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 28),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const SizedBox(height: 80),
+                _SpectreGlyph(),
+                const SizedBox(height: 8),
+                Text(
+                  '─── encrypted relay client ───',
+                  style: SpectreTypography.caption().copyWith(
+                    color: SpectreColors.textDim,
+                    letterSpacing: 3,
+                  ),
+                ),
+                const SizedBox(height: 48),
+                Text(
+                  'no phone numbers.',
+                  style: SpectreTypography.body().copyWith(
+                    color: SpectreColors.textBright,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'no recovery email.',
+                  style: SpectreTypography.body().copyWith(
+                    color: SpectreColors.textBright,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'no central directory.',
+                  style: SpectreTypography.body().copyWith(
+                    color: SpectreColors.textBright,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                const DashedDivider(),
+                const SizedBox(height: 20),
+                Text(
+                  'tapping [ initiate ] will generate a long-term '
+                  'identity key on this device. it is stored in the '
+                  'platform keystore and never transmitted. losing it '
+                  'means losing every session — there is no recovery.',
+                  style: SpectreTypography.caption().copyWith(
+                    color: SpectreColors.textCold,
+                    height: 1.7,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+                const Spacer(),
+                if (_err != null) ...<Widget>[
+                  Text(
+                    '[ fault :: ${_err.runtimeType} ]',
+                    style: SpectreTypography.danger().copyWith(fontSize: 11),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+                _ActionButton(
+                  label: _busy ? '[ generating… ]' : '[ INITIATE ]',
+                  color: _busy
+                      ? SpectreColors.blackHair
+                      : SpectreColors.purpleDeep,
+                  borderColor: SpectreColors.purpleBright,
+                  textColor: SpectreColors.textBright,
+                  onTap: _busy ? null : _initiate,
+                ),
+                const SizedBox(height: 28),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ContactScreen extends StatefulWidget {
+  const _ContactScreen({
+    required this.services,
+    required this.userId,
+    required this.prefetched,
+  });
+
+  final SpectreServices services;
+  final String userId;
+  final Contact? prefetched;
+
+  @override
+  State<_ContactScreen> createState() => _ContactScreenState();
+}
+
+class _ContactScreenState extends State<_ContactScreen> {
+  Contact? _contact;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.prefetched != null) {
+      _contact = widget.prefetched;
+      _loading = false;
+    } else {
+      _resolve();
+    }
+  }
+
+  Future<void> _resolve() async {
+    final db = await widget.services.database.open();
+    final rows = await db.query(
+      'contacts',
+      where: 'user_id = ?',
+      whereArgs: <Object>[widget.userId],
+      limit: 1,
+    );
+    if (!mounted) return;
+    setState(() {
+      _contact = rows.isEmpty
+          ? null
+          : Contact.fromMap(Map<String, Object?>.from(rows.first));
+      _loading = false;
+    });
+  }
+
+  Future<void> _toggleVerified() async {
+    final c = _contact;
+    if (c == null) return;
+    final updated = c.copyWith(isVerified: !c.isVerified);
+    final db = await widget.services.database.open();
+    await db.update(
+      'contacts',
+      <String, Object?>{'verified': updated.isVerified ? 1 : 0},
+      where: 'id = ?',
+      whereArgs: <Object>[c.id],
+    );
+    if (!mounted) return;
+    setState(() => _contact = updated);
+  }
+
+  String _truncate(String s, int n) =>
+      s.length <= n ? s : '${s.substring(0, n)}…';
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: SpectreColors.blackDeep,
+      appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, size: 20),
+          onPressed: () => Navigator.of(context).maybePop(),
+        ),
+        title: Text(
+          'PEER',
+          style: SpectreTypography.title().copyWith(letterSpacing: 4),
+        ),
+      ),
+      body: NoiseBackground(
+        child: _loading
+            ? const _RouteLoadingScreen(label: '[ loading peer… ]')
+            : _buildBody(),
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    final c = _contact;
+    if (c == null) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('> userId', style: SpectreTypography.caption()),
+            const SizedBox(height: 6),
+            SelectableText(
+              widget.userId,
+              style: SpectreTypography.mono().copyWith(
+                color: SpectreColors.textBright,
+              ),
+            ),
+            const SizedBox(height: 22),
+            const DashedDivider(),
+            const SizedBox(height: 22),
+            Text(
+              'no contact record yet.',
+              style: SpectreTypography.body(),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'a record is created the first time you receive a message '
+              'from this peer.',
+              style: SpectreTypography.caption().copyWith(height: 1.7),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final words = c.fingerprintWords;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text('> userId', style: SpectreTypography.caption()),
+          const SizedBox(height: 6),
+          SelectableText(
+            _truncate(c.userId, 24),
+            style: SpectreTypography.mono().copyWith(
+              color: SpectreColors.textBright,
+              fontSize: 14,
+            ),
+          ),
+          if (c.displayName != null) ...<Widget>[
+            const SizedBox(height: 22),
+            Text('> alias', style: SpectreTypography.caption()),
+            const SizedBox(height: 6),
+            Text(
+              c.displayName!,
+              style: SpectreTypography.mono().copyWith(
+                color: SpectreColors.textCold,
+              ),
+            ),
+          ],
+          const SizedBox(height: 22),
+          const DashedDivider(),
+          const SizedBox(height: 22),
+          Row(
+            children: <Widget>[
+              Container(
+                width: 6,
+                height: 6,
+                color: c.isVerified
+                    ? SpectreColors.matrixGreen
+                    : SpectreColors.redDanger,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                c.isVerified ? 'verified out-of-band' : 'unverified',
+                style: SpectreTypography.caption().copyWith(
+                  color: c.isVerified
+                      ? SpectreColors.matrixGreen
+                      : SpectreColors.redDanger,
+                  letterSpacing: 2,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text(
+            'compare these words with your peer on a separately-trusted '
+            'channel (in person, signed audio, scanned qr). matching means '
+            'no MITM. mismatch means abandon this session.',
+            style: SpectreTypography.caption().copyWith(height: 1.7),
+          ),
+          const SizedBox(height: 18),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              for (var i = 0; i < words.length; i++)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 6,
+                  ),
+                  decoration: const BoxDecoration(
+                    color: SpectreColors.blackLess,
+                    border: Border.fromBorderSide(
+                      BorderSide(color: SpectreColors.hairline, width: 1),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Text(
+                        '${(i + 1).toString().padLeft(2, '0')}',
+                        style: SpectreTypography.stamp().copyWith(
+                          color: SpectreColors.textFaint,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        words[i],
+                        style: SpectreTypography.mono().copyWith(
+                          color: SpectreColors.textBright,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 26),
+          _ActionButton(
+            label:
+                c.isVerified ? '[ MARK UNVERIFIED ]' : '[ MARK AS VERIFIED ]',
+            color: c.isVerified
+                ? SpectreColors.blackHair
+                : SpectreColors.purpleDeep,
+            borderColor: c.isVerified
+                ? SpectreColors.hairline
+                : SpectreColors.purpleBright,
+            textColor: c.isVerified
+                ? SpectreColors.textDim
+                : SpectreColors.textBright,
+            onTap: _toggleVerified,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SettingsScreen extends StatelessWidget {
+  const _SettingsScreen({required this.services});
+
+  final SpectreServices services;
+
+  String _truncate(String s, int n) =>
+      s.length <= n ? s : '${s.substring(0, n)}…';
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: SpectreColors.blackDeep,
+      appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, size: 20),
+          onPressed: () => Navigator.of(context).maybePop(),
+        ),
+        title: Text(
+          'CONFIG',
+          style: SpectreTypography.title().copyWith(letterSpacing: 4),
+        ),
+      ),
+      body: NoiseBackground(
+        child: ListView(
+          children: <Widget>[
+            _SettingsTile(
+              label: 'identity',
+              value: services.currentUserId == null
+                  ? '——'
+                  : _truncate(services.currentUserId!, 24),
+            ),
+            _SettingsTile(
+              label: 'relay',
+              value: services.relayUrl?.toString() ?? '——',
+            ),
+            _SettingsTile(
+              label: 'sealed sender',
+              value: 'enabled',
+              valueColor: SpectreColors.matrixGreen,
+            ),
+            _SettingsTile(
+              label: 'analytics / crash reports',
+              value: 'disabled',
+              valueColor: SpectreColors.matrixGreen,
+            ),
+            _SettingsTile(
+              label: 'forward secrecy',
+              value: 'double-ratchet active',
+              valueColor: SpectreColors.matrixGreen,
+            ),
+            const HairlineDivider(),
+            const SizedBox(height: 24),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Text(
+                'DANGER',
+                style: SpectreTypography.danger().copyWith(letterSpacing: 4),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: const DashedDivider(color: SpectreColors.redDanger),
+            ),
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: _ActionButton(
+                label: '[ PANIC WIPE ]',
+                color: SpectreColors.redBlood,
+                borderColor: SpectreColors.redDanger,
+                textColor: SpectreColors.textBright,
+                onTap: () async {
+                  final svc = services.messageService;
+                  if (svc == null) return;
+                  await svc.panicWipe();
+                  services.onWiped();
+                },
+              ),
+            ),
+            const SizedBox(height: 30),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SettingsTile extends StatelessWidget {
+  const _SettingsTile({
+    required this.label,
+    required this.value,
+    this.valueColor,
+  });
+
+  final String label;
+  final String value;
+  final Color? valueColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      decoration: const BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: SpectreColors.hairline, width: 1),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Expanded(
+            flex: 4,
+            child: Text(
+              label,
+              style: SpectreTypography.caption().copyWith(
+                color: SpectreColors.textDim,
+                letterSpacing: 2,
+              ),
+            ),
+          ),
+          Expanded(
+            flex: 6,
+            child: SelectableText(
+              value,
+              style: SpectreTypography.mono().copyWith(
+                color: valueColor ?? SpectreColors.textBright,
+                fontSize: 12,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActionButton extends StatelessWidget {
+  const _ActionButton({
+    required this.label,
+    required this.color,
+    required this.borderColor,
+    required this.textColor,
+    required this.onTap,
+  });
+
+  final String label;
+  final Color color;
+  final Color borderColor;
+  final Color textColor;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color,
+          border: Border.all(color: borderColor, width: 1),
+        ),
+        child: Text(
+          label,
+          style: SpectreTypography.action().copyWith(color: textColor),
+        ),
+      ),
+    );
+  }
+}
+
+class _SpectreGlyph extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: <Widget>[
+        Container(width: 10, height: 10, color: SpectreColors.matrixGreen),
+        const SizedBox(width: 12),
+        Text(
+          'SPECTRE',
+          style: SpectreTypography.display().copyWith(
+            fontSize: 28,
+            letterSpacing: 8,
+          ),
+        ),
+      ],
+    );
+  }
+}

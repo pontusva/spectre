@@ -1,0 +1,42 @@
+name: spectre
+description: "Secure messaging for activists and journalists."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.0-138.0.dev
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # Signal Protocol - E2E encryption
+  libsignal_protocol_dart: ^0.4.0
+
+  # Encrypted local database
+  sqflite_sqlcipher: ^2.2.0
+
+  # Secure key storage (Android Keystore / Linux secret service)
+  flutter_secure_storage: ^9.0.0
+
+  # WebSocket for relay server
+  web_socket_channel: ^3.0.0
+
+  # Additional crypto
+  pointycastle: ^3.7.3
+
+  # Navigation
+  go_router: ^14.0.0
+
+  # UUID generation (for user IDs, no phone numbers)
+  uuid: ^4.3.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
