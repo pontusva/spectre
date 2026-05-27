@@ -112,12 +112,12 @@ class IdentityManager {
   Future<SpectreIdentity> _generateAndPersist() async {
     // Curve25519 key pair used as the device's identity. libsignal handles
     // the actual key generation using a CSPRNG.
-    final identityKeyPair = generateIdentityKeyPair();
+    final identityKeyPair = KeyHelper.generateIdentityKeyPair();
 
     // Per Signal spec, the registrationId is a 14-bit value (1..16380).
     // `false` here means non-extended range, which is what the wire protocol
     // expects.
-    final registrationId = generateRegistrationId(false);
+    final registrationId = KeyHelper.generateRegistrationId(false);
 
     // User ID: 256 bits from the platform CSPRNG, base64url encoded
     // (no padding) so it's URL/QR safe for out-of-band exchange. We

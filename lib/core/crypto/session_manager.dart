@@ -159,14 +159,14 @@ class SessionManager {
     final cipher = SessionCipher.fromStore(_store, address);
 
     Uint8List plaintextBytes;
-    if (type == CiphertextMessage.prekeyType) {
+    if (type == CiphertextMessage.PREKEY_TYPE) {
       // First message: parsing it constructs an implicit session using
       // the embedded prekey IDs to look up our own private halves. The
       // matching one-time prekey, if referenced, is automatically marked
       // for consumption by the underlying store.
       final preKeyMessage = PreKeySignalMessage(body);
       plaintextBytes = await cipher.decrypt(preKeyMessage);
-    } else if (type == CiphertextMessage.whisperType) {
+    } else if (type == CiphertextMessage.WHISPER_TYPE) {
       // Subsequent message: requires an existing session. If no session
       // exists locally (e.g. user reinstalled, panic wiped, or we're out
       // of sync with the peer's ratchet), this throws and the UI should
@@ -176,7 +176,7 @@ class SessionManager {
     } else {
       // Anything else is either a corrupt envelope or a hostile peer
       // trying to confuse our parser. Fail closed.
-      throw InvalidMessageException('Unknown ciphertext type: $type');
+      throw Exception('Unknown ciphertext type: $type');
     }
 
     return utf8.decode(plaintextBytes);

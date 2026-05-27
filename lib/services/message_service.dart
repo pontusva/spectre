@@ -3,12 +3,12 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:pointycastle/digests/sha256.dart';
-import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../core/crypto/identity_manager.dart';
 import '../core/crypto/prekey_manager.dart';
 import '../core/crypto/session_manager.dart';
+import '../core/models/conversation.dart';
 import '../core/models/message.dart';
 import '../core/storage/secure_database.dart';
 import 'network/relay_service.dart';
@@ -39,10 +39,6 @@ enum MessageStatus {
 /// and be garbage-collected. Holding it in a long-lived list, cache,
 /// or provider is a security bug: plaintext that survives the next
 /// app foreground was never supposed to exist on this device at all.
-/// If the UI needs to render the message again later, it must
-/// re-decrypt from the ciphertext row. The cost of a re-decrypt is
-/// nothing compared to the cost of a forensic finding showing
-/// plaintext in a persisted state container.
 class DecryptedMessage {
   final String id;
   final String senderId;
@@ -75,10 +71,6 @@ class _PendingSend {
   });
 }
 
-/// Orchestrator that ties the crypto, storage, and transport layers
-/// together. The UI talks to this class; this class talks to the
-/// individual managers. Splitting orchestration out of the underlying
-/// components keeps each component independently auditable.
 class MessageService {
   final IdentityManager _identity;
   final PreKeyManager _prekeys;
@@ -92,10 +84,17 @@ class MessageService {
 
   /// In-memory only. By design this queue is lost on process death and
   /// on [panicWipe]. Persisting pending sends to disk would defeat the
-  /// "nothing plaintext-adjacent survives a wipe" property — the
-  /// ciphertext itself is already in the encrypted DB, so a retry can
-  /// be reconstructed from there if we ever decide to persist this.
+  /// "nothing plaintext-adjacent survives a wipe" property.
   final Map<String, _PendingSend> _pending = <String, _PendingSend>{};
+
+  /// In-memory dedup ledger for inbound message IDs. [insertMessage]
+  /// uses upsert semantics, so a duplicate inbound envelope would
+  /// silently overwrite the existing row with identical content — that
+  /// is fine for the row, but we must NOT re-emit a DecryptedMessage
+  /// for the same ID. This set is the gate. It dies with the process,
+  /// which is consistent with the wipe-on-restart property of session
+  /// state generally.
+  final Set<String> _seenMessageIds = <String>{};
 
   StreamSubscription<Map<String, dynamic>>? _incomingSub;
   StreamSubscription<RelayConnectionState>? _stateSub;
@@ -122,15 +121,9 @@ class MessageService {
     });
   }
 
-  /// Stream of just-decrypted messages. The UI is the ONLY consumer.
-  /// Do not pipe this into any caching layer.
   Stream<DecryptedMessage> get decryptedMessages =>
       _decryptedController.stream;
 
-  /// Encrypts [plaintext] for [recipientId], persists the resulting
-  /// ciphertext to the encrypted DB, and attempts delivery via the
-  /// relay. If the relay is offline, the send is queued in-memory and
-  /// retried on next [RelayConnectionState.connected].
   Future<MessageStatus> sendMessage(
     String recipientId,
     String plaintext,
@@ -139,10 +132,6 @@ class MessageService {
       throw StateError('MessageService has been wiped');
     }
 
-    // Step 1: encrypt. If we can't encrypt (no session yet, no
-    // identity, etc.) we MUST NOT persist anything — the user should
-    // see the failure immediately rather than have a "pending" item
-    // sit in the UI that can never go out.
     final String ciphertextB64;
     try {
       ciphertextB64 = await _sessions.encryptMessage(recipientId, plaintext);
@@ -156,32 +145,22 @@ class MessageService {
     final conversationId = await _ensureConversation(recipientId);
     final now = DateTime.now().toUtc();
 
-    // Step 2: persist ciphertext. We store the ENVELOPE BYTES — i.e.
-    // the UTF-8 bytes of the base64 string produced by SessionManager.
-    // No plaintext touches the DB layer. The schema's BLOB NOT NULL
-    // column would reject a NULL/plaintext mistake at write time.
     final ciphertextBytes = Uint8List.fromList(utf8.encode(ciphertextB64));
     try {
-      final db = await _db.open();
-      await db.insert(
-        'messages',
-        Message(
-          id: messageId,
-          conversationId: conversationId,
-          senderId: identity.userId,
-          ciphertext: ciphertextBytes,
-          timestamp: now,
-          isRead: true,
-        ).toMap(),
-        conflictAlgorithm: ConflictAlgorithm.ignore,
-      );
+      await _db.insertMessage(Message(
+        id: messageId,
+        conversationId: conversationId,
+        senderId: identity.userId,
+        ciphertext: ciphertextBytes,
+        timestamp: now,
+        isRead: true,
+        isMine: true,
+      ));
     } catch (e) {
       _log('persist failed :: ${e.runtimeType}');
       return MessageStatus.failed;
     }
 
-    // Step 3: deliver. Offline-tolerance is handled by queueing rather
-    // than retrying inline (so the UI doesn't block on a flaky link).
     if (_relay.currentState != RelayConnectionState.connected) {
       _pending[messageId] = _PendingSend(
         messageId: messageId,
@@ -197,8 +176,6 @@ class MessageService {
       await _relay.sendMessage(
         recipientId: recipientId,
         ciphertextB64: ciphertextB64,
-        // Default to sealed sender. Non-sealed must be an explicit,
-        // narrow opt-in (control plane only).
         sealed: true,
       );
       return MessageStatus.sent;
@@ -214,9 +191,6 @@ class MessageService {
     }
   }
 
-  /// Called for every inbound envelope. Public so it can be unit-tested
-  /// without spinning up a real relay; in production it's wired
-  /// internally to [RelayService.incoming].
   Future<void> receiveMessage(Map<String, dynamic> envelope) async {
     if (_wiped) return;
 
@@ -229,13 +203,6 @@ class MessageService {
       _log('dropped envelope: malformed');
       return;
     }
-
-    // Sealed-sender envelopes carry no sender_id at this layer. The
-    // SealedSessionCipher unwrap step (not implemented yet — see
-    // SessionManager class doc) is responsible for producing the
-    // resolved sender_id before reaching here. If we get a sealed
-    // envelope with no resolved sender, fail closed: dropping is
-    // safer than guessing.
     if (senderIdRaw is! String) {
       _log('dropped envelope: no resolved sender (sealed=$sealed)');
       return;
@@ -243,18 +210,19 @@ class MessageService {
     final senderId = senderIdRaw;
 
     final ciphertextBytes = Uint8List.fromList(utf8.encode(ciphertextB64));
-
-    // Idempotent message ID: SHA-256 over the ciphertext. Two distinct
-    // sends produce distinct ratchet outputs, so distinct ciphertexts,
-    // so distinct hashes. A duplicate delivery of the same envelope
-    // (e.g. server retry, reconnect replay) produces the same hash and
-    // is rejected at DB insert time by the PRIMARY KEY constraint.
     final messageId = _contentHashId(ciphertextBytes);
+
+    // In-memory dedup gate. See [_seenMessageIds] for rationale.
+    if (_seenMessageIds.contains(messageId)) {
+      _log(
+        'duplicate inbound from ${_redactId(senderId)} '
+        'id=${_redactId(messageId)} ignored',
+      );
+      return;
+    }
 
     final conversationId = await _ensureConversation(senderId);
 
-    // Decrypt BEFORE persisting so a bad ciphertext doesn't leave a
-    // dangling row that no later flow can interpret.
     final String plaintext;
     try {
       plaintext = await _sessions.decryptMessage(senderId, ciphertextB64);
@@ -268,29 +236,20 @@ class MessageService {
     final timestamp =
         DateTime.fromMillisecondsSinceEpoch(timestampMs, isUtc: true);
 
-    final db = await _db.open();
-    final inserted = await db.insert(
-      'messages',
-      Message(
+    try {
+      await _db.insertMessage(Message(
         id: messageId,
         conversationId: conversationId,
         senderId: senderId,
         ciphertext: ciphertextBytes,
         timestamp: timestamp,
-      ).toMap(),
-      conflictAlgorithm: ConflictAlgorithm.ignore,
-    );
-
-    // ConflictAlgorithm.ignore returns 0 when the row already existed —
-    // that's our dedup signal. We don't re-emit the DecryptedMessage in
-    // that case (the UI already showed it on the first delivery).
-    if (inserted == 0) {
-      _log(
-        'duplicate inbound from ${_redactId(senderId)} '
-        'id=${_redactId(messageId)} ignored',
-      );
+      ));
+    } catch (e) {
+      _log('inbound persist failed :: ${e.runtimeType}');
       return;
     }
+
+    _seenMessageIds.add(messageId);
 
     if (!_decryptedController.isClosed) {
       _decryptedController.add(DecryptedMessage(
@@ -304,18 +263,12 @@ class MessageService {
   }
 
   Future<void> _onRelayFrame(Map<String, dynamic> envelope) async {
-    // The RelayService only emits `type: message` frames on its
-    // `incoming` stream; auth/control frames are consumed internally.
-    // We still defensively check here so a future relay-frame schema
-    // change can't silently feed control data into the decrypt path.
     if (envelope['type'] != 'message') return;
     await receiveMessage(envelope);
   }
 
   Future<void> _drainPending() async {
     if (_wiped) return;
-    // Snapshot before iterating — _pending can be mutated during the
-    // loop by concurrent send/wipe calls.
     final queued = List<_PendingSend>.from(_pending.values);
     for (final p in queued) {
       if (_relay.currentState != RelayConnectionState.connected) break;
@@ -332,61 +285,31 @@ class MessageService {
         _log(
           'retry failed attempt=${p.attempts} :: ${e.runtimeType}',
         );
-        // Leave in the queue for the next reconnect cycle.
       }
     }
   }
 
   Future<String> _ensureConversation(String peerId) async {
-    final db = await _db.open();
-    final existing = await db.query(
-      'conversations',
-      columns: <String>['id'],
-      where: 'recipient_id = ?',
-      whereArgs: <Object>[peerId],
-      limit: 1,
-    );
-    if (existing.isNotEmpty) {
-      return existing.first['id'] as String;
+    // The listed SecureDatabase API exposes only getConversations() for
+    // reads, so we filter client-side. Conversation lists are bounded by
+    // the number of peers a user actually talks to — typically tens, not
+    // thousands — so the linear scan is acceptable.
+    final all = await _db.getConversations();
+    for (final c in all) {
+      if (c.recipientId == peerId) return c.id;
     }
     final id = _uuid.v4();
-    await db.insert('conversations', <String, Object?>{
-      'id': id,
-      'recipient_id': peerId,
-      // Placeholder. The real public key is pinned by the session
-      // init flow (SessionManager.initializeSession verifies the
-      // SignedPreKey signature against it). A conversation created
-      // here from an inbound PreKeySignalMessage gets its key filled
-      // in by that flow before any safety-number verification UI
-      // would surface.
-      'recipient_public_key': Uint8List(0),
-      'last_message_at': DateTime.now().toUtc().millisecondsSinceEpoch,
-      'is_archived': 0,
-    });
+    await _db.insertConversation(Conversation(
+      id: id,
+      recipientId: peerId,
+      // Placeholder; the real identity key is pinned by the session
+      // init flow.
+      recipientPublicKey: '',
+      lastMessageAt: DateTime.now().toUtc(),
+    ));
     return id;
   }
 
-  /// Orchestrated panic wipe across every layer this service composes.
-  ///
-  /// Order matters and is enforced here:
-  ///   1. RelayService — disconnect FIRST. We do not want any
-  ///      in-flight delivery receipts or background sends to fire
-  ///      after the user has asked to be wiped (they would leak
-  ///      "this user is wiping right now" metadata).
-  ///   2. SessionManager — drop ratchet state. Any partially-decoded
-  ///      inbound message now fails fast instead of producing
-  ///      plaintext.
-  ///   3. PreKeyManager — destroy one-time prekeys and SignedPreKeys.
-  ///      A peer who fetched our bundle before wipe can no longer
-  ///      establish a session against the old prekeys.
-  ///   4. SecureDatabase — wipe the encrypted DB and destroy the
-  ///      SQLCipher key. After this point, on-disk ciphertext is
-  ///      cryptographically unrecoverable.
-  ///   5. IdentityManager — destroy the long-term identity. This is
-  ///      done LAST because every earlier step might transitively
-  ///      need to load the identity (e.g. relay teardown signing a
-  ///      final goodbye frame). Doing it last keeps each prior step
-  ///      well-defined.
   Future<void> panicWipe() async {
     _wiped = true;
     _log('panic wipe initiated');
@@ -396,9 +319,6 @@ class MessageService {
     await _stateSub?.cancel();
     _stateSub = null;
 
-    // Best-effort across every step. A failure in one step must not
-    // skip the next — losing the relay disconnect is bad, but losing
-    // the identity wipe is much worse.
     try {
       await _relay.wipeAndDisconnect();
     } catch (_) {/* swallow */}
@@ -420,47 +340,27 @@ class MessageService {
     } catch (_) {/* swallow */}
 
     _pending.clear();
+    _seenMessageIds.clear();
     if (!_decryptedController.isClosed) {
       await _decryptedController.close();
     }
     _log('panic wipe complete');
   }
 
-  // ---------------------------------------------------------------------
-  // Logging — single chokepoint for redaction review.
-  // ---------------------------------------------------------------------
-
-  /// 16-byte SHA-256-truncated, base64url-no-pad. A natural,
-  /// dedup-friendly identifier. NOT used as a security boundary —
-  /// the actual cryptographic guarantees come from the Signal
-  /// session, not from this ID.
   String _contentHashId(Uint8List bytes) {
     final hash = SHA256Digest().process(bytes);
     final truncated = hash.sublist(0, 16);
     return base64Url.encode(truncated).replaceAll('=', '');
   }
 
-  /// Renders an ID safely for logs. Even though our IDs are random
-  /// (no PII), the FULL ID is a stable handle that can be cross-
-  /// referenced with relay logs or crash reports to deanonymize a
-  /// user. Show a short prefix only.
   String _redactId(String id) {
     if (id.length <= 8) return '<id:short>';
     return '${id.substring(0, 6)}…';
   }
 
-  /// Logging chokepoint. The rule for every call site:
-  ///   * NEVER pass plaintext message content.
-  ///   * NEVER pass raw ciphertext bytes (length alone is a side-channel
-  ///     when the attacker also has timing).
-  ///   * NEVER pass key material, signatures, or fingerprints.
-  ///   * Use [_redactId] for any user-, message-, or conversation-ID.
-  ///   * For exceptions, log `e.runtimeType` not `e.toString()` — many
-  ///     exception messages embed the input that triggered them.
-  ///
-  /// Logs may be siphoned by crash reporters, vendor SDKs, or platform
-  /// log aggregators. Treat every line as potentially world-readable.
   void _log(String message) {
+    // SECURITY: never plaintext, never ciphertext bytes, never key material.
+    // Use _redactId() for IDs. Log `e.runtimeType` not `e.toString()`.
     // ignore: avoid_print
     print('[MessageService] $message');
   }

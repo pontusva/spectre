@@ -105,7 +105,7 @@ class PreKeyManager {
     // counter so that IDs are never reused even after consumption — reusing
     // an ID would let an attacker who recorded an old PreKeyMessage replay
     // it against a freshly generated prekey with the same ID.
-    final preKeys = generatePreKeys(1, kInitialPreKeyCount);
+    final preKeys = KeyHelper.generatePreKeys(1, kInitialPreKeyCount);
     await _persistPreKeys(preKeys);
     await _storage.write(
       key: _kPreKeyNextId,
@@ -118,7 +118,8 @@ class PreKeyManager {
 
     // SignedPreKey IDs share the 24-bit space but live in a separate
     // counter — they are stored and looked up independently.
-    final signedPreKey = generateSignedPreKey(identity.identityKeyPair, 1);
+    final signedPreKey =
+        KeyHelper.generateSignedPreKey(identity.identityKeyPair, 1);
     await _persistSignedPreKey(signedPreKey);
     await _storage.write(key: _kSignedPreKeyCurId, value: '1');
     await _storage.write(key: _kSignedPreKeyNextId, value: '2');
@@ -188,7 +189,7 @@ class PreKeyManager {
 
   Future<void> _refillPreKeys() async {
     final nextId = int.parse((await _storage.read(key: _kPreKeyNextId))!);
-    final fresh = generatePreKeys(nextId, kRefillBatchSize);
+    final fresh = KeyHelper.generatePreKeys(nextId, kRefillBatchSize);
     await _persistPreKeys(fresh);
 
     final ids = await _readPreKeyIndex();
@@ -240,7 +241,7 @@ class PreKeyManager {
 
     final newId = int.parse(nextIdRaw ?? '1');
     final newRecord =
-        generateSignedPreKey(identity.identityKeyPair, newId);
+        KeyHelper.generateSignedPreKey(identity.identityKeyPair, newId);
     await _persistSignedPreKey(newRecord);
 
     await _storage.write(key: _kSignedPreKeyCurId, value: newId.toString());
@@ -254,6 +255,15 @@ class PreKeyManager {
     );
 
     return newRecord;
+  }
+
+  /// Returns the timestamp at which the current SignedPreKey was minted,
+  /// or `null` if no SignedPreKey has been generated yet (i.e. before
+  /// first run). Used by the settings UI to display the rotation date.
+  Future<DateTime?> lastSignedPreKeyRotation() async {
+    final ts = await _storage.read(key: _kSignedPreKeyRotatedAt);
+    if (ts == null) return null;
+    return DateTime.fromMillisecondsSinceEpoch(int.parse(ts), isUtc: true);
   }
 
   /// Returns true if the SignedPreKey is older than the rotation interval.

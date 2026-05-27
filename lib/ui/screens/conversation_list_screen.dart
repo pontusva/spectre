@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/models/conversation.dart';
@@ -54,26 +53,10 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
   }
 
   Future<void> _load() async {
-    final db = await widget.database.open();
-    final rows = await db.rawQuery(
-      'SELECT c.id, c.recipient_id, c.recipient_public_key, '
-      'c.last_message_at, c.is_archived, '
-      '(SELECT COUNT(*) FROM messages m '
-      ' WHERE m.conversation_id = c.id AND m.is_read = 0 '
-      '   AND m.sender_id != ?) AS unread '
-      'FROM conversations c '
-      'WHERE c.is_archived = 0 '
-      'ORDER BY c.last_message_at DESC',
-      <Object>[widget.currentUserId],
-    );
+    final convs = await widget.database.getConversations();
     if (!mounted) return;
     setState(() {
-      _conversations = rows
-          .map((r) => Conversation.fromMap(
-                Map<String, Object?>.from(r),
-                unreadCount: (r['unread'] as int?) ?? 0,
-              ))
-          .toList(growable: false);
+      _conversations = convs;
       _loading = false;
     });
   }
@@ -103,33 +86,27 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
     );
     if (recipientId == null || recipientId.isEmpty || !mounted) return;
 
-    final db = await widget.database.open();
-    final existing = await db.query(
-      'conversations',
-      where: 'recipient_id = ?',
-      whereArgs: <Object>[recipientId],
-      limit: 1,
-    );
-    Conversation conversation;
-    if (existing.isNotEmpty) {
-      conversation = Conversation.fromMap(
-        Map<String, Object?>.from(existing.first),
-      );
+    final all = await widget.database.getConversations();
+    Conversation? existing;
+    for (final c in all) {
+      if (c.recipientId == recipientId) {
+        existing = c;
+        break;
+      }
+    }
+
+    final Conversation conversation;
+    if (existing != null) {
+      conversation = existing;
     } else {
       final id = _uuid.v4();
-      await db.insert('conversations', <String, Object?>{
-        'id': id,
-        'recipient_id': recipientId,
-        'recipient_public_key': <int>[],
-        'last_message_at': 0,
-        'is_archived': 0,
-      });
       conversation = Conversation(
         id: id,
         recipientId: recipientId,
         recipientPublicKey: '',
         lastMessageAt: null,
       );
+      await widget.database.insertConversation(conversation);
     }
     await _load();
     if (!mounted) return;
@@ -149,27 +126,17 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
     );
     if (action == null || !mounted) return;
 
-    final db = await widget.database.open();
     switch (action) {
       case _TileAction.archive:
-        await db.update(
-          'conversations',
-          <String, Object>{'is_archived': 1},
-          where: 'id = ?',
-          whereArgs: <Object>[c.id],
-        );
+        // insertConversation uses upsert semantics — flipping isArchived
+        // on the existing row.
+        await widget.database
+            .insertConversation(c.copyWith(isArchived: true));
         break;
       case _TileAction.delete:
-        await db.delete(
-          'messages',
-          where: 'conversation_id = ?',
-          whereArgs: <Object>[c.id],
-        );
-        await db.delete(
-          'conversations',
-          where: 'id = ?',
-          whereArgs: <Object>[c.id],
-        );
+        // Cascade deletes the linked messages via the FK ON DELETE
+        // CASCADE inside SecureDatabase.
+        await widget.database.deleteConversation(c.id);
         break;
     }
     await _load();
@@ -201,7 +168,8 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Text('SPECTRE', style: SpectreTypography.display().copyWith(fontSize: 16)),
+            Text('SPECTRE',
+                style: SpectreTypography.display().copyWith(fontSize: 16)),
             const SizedBox(width: 10),
             Container(
               width: 6,

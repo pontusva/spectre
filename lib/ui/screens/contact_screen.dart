@@ -2,10 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:pointycastle/digests/sha256.dart';
-import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../../core/crypto/identity_manager.dart';
 import '../../core/models/contact.dart';
+import '../../core/models/conversation.dart';
+import '../../core/models/message.dart';
 import '../theme/app_theme.dart';
 import '../theme/router.dart';
 
@@ -38,7 +39,8 @@ class _ContactScreenState extends State<ContactScreen> {
     _contact = widget.contact;
     _scroll.addListener(_onScroll);
     _loadOwnFingerprint();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeUnlockShortPages());
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _maybeUnlockShortPages());
   }
 
   @override
@@ -63,12 +65,12 @@ class _ContactScreenState extends State<ContactScreen> {
       );
       if (!mounted) return;
       setState(() => _ownWords = temp.fingerprintWords);
-      WidgetsBinding.instance.addPostFrameCallback((_) => _maybeUnlockShortPages());
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _maybeUnlockShortPages());
     } catch (_) {
-      // Fingerprint compute failure is rare; leave _ownWords null and
-      // the UI will display a "[ deriving… ]" placeholder. Verification
-      // remains locked because comparison is impossible without our
-      // half of the words.
+      // Fingerprint compute failure leaves _ownWords null; the UI shows
+      // a "[ deriving… ]" placeholder. Verification remains locked
+      // because comparison is impossible without our half of the words.
     }
   }
 
@@ -93,13 +95,8 @@ class _ContactScreenState extends State<ContactScreen> {
   Future<void> _markVerified() async {
     if (_busy || !_canVerify) return;
     setState(() => _busy = true);
-    final db = await widget.services.database.open();
-    await db.update(
-      'contacts',
-      <String, Object?>{'verified': 1},
-      where: 'id = ?',
-      whereArgs: <Object>[_contact.id],
-    );
+    await widget.services.database
+        .updateContactVerified(_contact.userId, true);
     if (!mounted) return;
     setState(() {
       _contact = _contact.copyWith(isVerified: true);
@@ -111,13 +108,8 @@ class _ContactScreenState extends State<ContactScreen> {
   Future<void> _reVerify() async {
     if (_busy) return;
     setState(() => _busy = true);
-    final db = await widget.services.database.open();
-    await db.update(
-      'contacts',
-      <String, Object?>{'verified': 0},
-      where: 'id = ?',
-      whereArgs: <Object>[_contact.id],
-    );
+    await widget.services.database
+        .updateContactVerified(_contact.userId, false);
     if (!mounted) return;
     setState(() {
       _contact = _contact.copyWith(isVerified: false);
@@ -135,22 +127,18 @@ class _ContactScreenState extends State<ContactScreen> {
   }
 
   Future<void> _confirmAndDelete() async {
-    final db = await widget.services.database.open();
-    final convs = await db.query(
-      'conversations',
-      columns: <String>['id'],
-      where: 'recipient_id = ?',
-      whereArgs: <Object>[_contact.userId],
-    );
-    final convCount = convs.length;
-    final messageCount = Sqflite.firstIntValue(
-          await db.rawQuery(
-            'SELECT COUNT(*) FROM messages WHERE conversation_id IN '
-            '(SELECT id FROM conversations WHERE recipient_id = ?)',
-            <Object>[_contact.userId],
-          ),
-        ) ??
-        0;
+    // Count cascades client-side via the listed API — getConversations()
+    // then getMessages() for the ones tied to this peer. Conversation
+    // lists are bounded by the number of peers a user actually talks
+    // to so the scan is acceptable.
+    final allConvs = await widget.services.database.getConversations();
+    final matching =
+        allConvs.where((Conversation c) => c.recipientId == _contact.userId).toList();
+    int messageCount = 0;
+    for (final c in matching) {
+      final msgs = await widget.services.database.getMessages(c.id);
+      messageCount += msgs.length;
+    }
 
     if (!mounted) return;
     final confirmed = await showDialog<bool>(
@@ -158,28 +146,16 @@ class _ContactScreenState extends State<ContactScreen> {
       barrierColor: Colors.black.withOpacity(0.78),
       builder: (ctx) => _DeleteConfirmDialog(
         contactLabel: _truncate(_contact.userId, 8),
-        conversationCount: convCount,
+        conversationCount: matching.length,
         messageCount: messageCount,
       ),
     );
     if (confirmed != true || !mounted) return;
 
     setState(() => _busy = true);
-    for (final c in convs) {
-      // FK ON DELETE CASCADE on messages.conversation_id removes the
-      // associated message rows when the parent conversation is
-      // dropped — see SecureDatabase._onCreate.
-      await db.delete(
-        'conversations',
-        where: 'id = ?',
-        whereArgs: <Object>[c['id'] as Object],
-      );
-    }
-    await db.delete(
-      'contacts',
-      where: 'id = ?',
-      whereArgs: <Object>[_contact.id],
-    );
+    // deleteContact wipes contact + cascade-removes all conversations
+    // and their messages atomically inside SecureDatabase.
+    await widget.services.database.deleteContact(_contact.userId);
     if (!mounted) return;
     Navigator.of(context).maybePop();
   }
@@ -550,7 +526,8 @@ class _WordColumn extends StatelessWidget {
   List<Widget> _buildRows(List<String> words) {
     final rows = <Widget>[];
     for (var i = 0; i < words.length; i++) {
-      rows.add(_row(i + 1, words[i], dim: (i % 4) == 3 && i != words.length - 1));
+      rows.add(_row(i + 1, words[i],
+          dim: (i % 4) == 3 && i != words.length - 1));
     }
     return rows;
   }

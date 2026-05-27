@@ -199,20 +199,20 @@ class _ChatRouteResolverState extends State<_ChatRouteResolver> {
 
   Future<void> _resolve() async {
     try {
-      final db = await widget.services.database.open();
-      final rows = await db.query(
-        'conversations',
-        where: 'id = ?',
-        whereArgs: <Object>[widget.conversationId],
-        limit: 1,
-      );
+      // The listed SecureDatabase API exposes getConversations() as the
+      // only read path. We scan client-side — conversation lists are
+      // bounded by peer count so this is acceptable.
+      final all = await widget.services.database.getConversations();
+      Conversation? found;
+      for (final c in all) {
+        if (c.id == widget.conversationId) {
+          found = c;
+          break;
+        }
+      }
       if (!mounted) return;
       setState(() {
-        _conversation = rows.isEmpty
-            ? null
-            : Conversation.fromMap(
-                Map<String, Object?>.from(rows.first),
-              );
+        _conversation = found;
         _loading = false;
       });
     } catch (e) {
@@ -456,18 +456,10 @@ class _ContactScreenState extends State<_ContactScreen> {
   }
 
   Future<void> _resolve() async {
-    final db = await widget.services.database.open();
-    final rows = await db.query(
-      'contacts',
-      where: 'user_id = ?',
-      whereArgs: <Object>[widget.userId],
-      limit: 1,
-    );
+    final c = await widget.services.database.getContact(widget.userId);
     if (!mounted) return;
     setState(() {
-      _contact = rows.isEmpty
-          ? null
-          : Contact.fromMap(Map<String, Object?>.from(rows.first));
+      _contact = c;
       _loading = false;
     });
   }
@@ -476,13 +468,8 @@ class _ContactScreenState extends State<_ContactScreen> {
     final c = _contact;
     if (c == null) return;
     final updated = c.copyWith(isVerified: !c.isVerified);
-    final db = await widget.services.database.open();
-    await db.update(
-      'contacts',
-      <String, Object?>{'verified': updated.isVerified ? 1 : 0},
-      where: 'id = ?',
-      whereArgs: <Object>[c.id],
-    );
+    await widget.services.database
+        .updateContactVerified(c.userId, updated.isVerified);
     if (!mounted) return;
     setState(() => _contact = updated);
   }

@@ -3,7 +3,6 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../../core/models/message.dart';
 import '../../core/storage/secure_database.dart';
@@ -63,29 +62,19 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _loadHistory() async {
-    final db = await widget.database.open();
-    final rows = await db.query(
-      'messages',
-      where: 'conversation_id = ?',
-      whereArgs: <Object>[widget.conversationId],
-      orderBy: 'timestamp ASC',
-    );
+    final history = await widget.database.getMessages(widget.conversationId);
     if (!mounted) return;
     setState(() {
-      for (final r in rows) {
-        final msg = Message.fromMap(
-          Map<String, Object?>.from(r),
-          isMine: r['sender_id'] == widget.currentUserId,
-        );
+      for (final msg in history) {
         if (_knownIds.add(msg.id)) {
           _items.add(_ChatItem(
             id: msg.id,
-            isMine: msg.isMine,
+            isMine: msg.senderId == widget.currentUserId,
             senderId: msg.senderId,
             timestamp: msg.timestamp,
             expiresAt: msg.expiresAt,
             plaintext: null,
-            status: msg.isMine ? _Status.sent : null,
+            status: msg.senderId == widget.currentUserId ? _Status.sent : null,
           ));
         }
       }
@@ -497,14 +486,15 @@ class _DecayBarState extends State<_DecayBar> {
     if (totalMs <= 0) {
       return const SizedBox(height: 2);
     }
-    final elapsedMs =
-        DateTime.now().toUtc().difference(widget.startedAt.toUtc()).inMilliseconds;
+    final elapsedMs = DateTime.now()
+        .toUtc()
+        .difference(widget.startedAt.toUtc())
+        .inMilliseconds;
     final remaining = (1.0 - (elapsedMs / totalMs)).clamp(0.0, 1.0);
     return LayoutBuilder(
       builder: (ctx, constraints) {
-        final maxWidth = constraints.maxWidth.isFinite
-            ? constraints.maxWidth
-            : 180.0;
+        final maxWidth =
+            constraints.maxWidth.isFinite ? constraints.maxWidth : 180.0;
         return SizedBox(
           height: 2,
           width: maxWidth,

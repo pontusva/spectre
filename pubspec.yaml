@@ -16,8 +16,6 @@ dependencies:
   libsignal_protocol_dart: ^0.4.0
 
   # Encrypted local database
-  sqflite_sqlcipher: ^2.2.0
-
   # Secure key storage (Android Keystore / Linux secret service)
   flutter_secure_storage: ^9.0.0
 
@@ -32,11 +30,18 @@ dependencies:
 
   # UUID generation (for user IDs, no phone numbers)
   uuid: ^4.3.3
-
+  drift: ^2.33.0
+  sqlite3: ^3.3.2
+  sqlite3_flutter_libs: ^0.6.0+eol
+  drift_flutter: ^0.3.0
+  path: ^1.9.1
+  path_provider: ^2.1.5
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  build_runner: ^2.15.0
+  drift_dev: ^2.33.0
 
 flutter:
   uses-material-design: true

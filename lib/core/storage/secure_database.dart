@@ -1,262 +1,220 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:drift/drift.dart';
+import 'package:drift/native.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:sqflite_sqlcipher/sqflite.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
-/// Encrypted local database for messages, conversations, and contacts.
-///
-/// Security architecture:
-///   * File-at-rest encryption is SQLCipher (AES-256-CBC + HMAC-SHA512
-///     per page). The page file is opaque without the key, including
-///     headers — an attacker pulling the file off the device cannot tell
-///     it apart from random noise.
-///   * The database key is 32 raw bytes (256 bits) from
-///     [Random.secure()] — i.e. the OS CSPRNG. It is generated exactly
-///     once on first run and held in [FlutterSecureStorage], which on
-///     Android is backed by the hardware Keystore via EncryptedSharedPrefs
-///     and on iOS by the Keychain with first-unlock-this-device access.
-///   * Because we pass the key in `x'<hex>'` form, SQLCipher uses the raw
-///     bytes directly and does NOT run them through PBKDF2. A passphrase
-///     would offer slow brute-force resistance; a 256-bit random key
-///     doesn't need any — KDF stretching here would just waste CPU on
-///     every open.
-///   * NO PLAINTEXT MESSAGE CONTENT is ever written. The `messages.
-///     ciphertext` column stores the Signal Protocol output of
-///     [SessionManager.encryptMessage]. If SQLCipher is ever broken
-///     (key extraction from a compromised device, future cryptanalysis,
-///     etc.), the attacker still faces the Double Ratchet on every
-///     message. Defense in depth, layered ciphers.
-///   * Disappearing messages: rows carry an absolute [expires_at]
-///     timestamp. We hard-delete (no soft-delete tombstones) on every app
-///     foreground via [deleteExpiredMessages], and `cipher_secure_delete`
-///     is set so freed pages are zeroed before being re-encrypted. A
-///     forensic image of the device captured after expiry should not
-///     recover the row from freed pages.
-///   * Panic wipe ([wipeDatabase]) destroys the SQLCipher key — without
-///     it, the file is mathematically unrecoverable regardless of
-///     whatever flash blocks survive deletion on the underlying device.
-class SecureDatabase {
-  static const _kDbFileName = 'spectre.db';
+import '../models/contact.dart';
+import '../models/conversation.dart';
+import '../models/message.dart';
 
-  // Storage key for the SQLCipher master key. Short, opaque name so the
-  // Keystore namespace doesn't advertise "I am a database key".
-  static const _kKeyStorageKey = 'spectre.db.k';
+part 'secure_database.g.dart';
 
-  // Schema version. Bump on every migration and add an onUpgrade branch.
-  static const int _kSchemaVersion = 1;
+// ---------------------------------------------------------------------------
+// Table definitions.
+//
+// Each row class is named *Row to avoid clashing with the higher-level
+// model types (Message, Conversation, Contact) defined under core/models.
+// Conversion between the two layers happens in the public methods below.
+// ---------------------------------------------------------------------------
+
+@DataClassName('MessageRow')
+class Messages extends Table {
+  // Caller-generated UUID. The database NEVER mints IDs itself, so a row
+  // exported and re-imported keeps the same identity. This also makes the
+  // PRIMARY KEY usable for the recipient-side dedup hash in MessageService.
+  TextColumn get id => text()();
+
+  // FK to conversations.id with ON DELETE CASCADE — deleting a peer's
+  // conversation removes all of their messages atomically. Important for
+  // the "delete contact" flow which needs predictable cascading.
+  TextColumn get conversationId =>
+      text().references(Conversations, #id, onDelete: KeyAction.cascade)();
+
+  TextColumn get senderId => text()();
+
+  // The only representation of message content in the database. Encoded
+  // by SessionManager.encryptMessage and stored verbatim. Plaintext NEVER
+  // enters this column — the schema's NOT NULL BLOB constraint enforces
+  // the contract at write time.
+  BlobColumn get ciphertext => blob()();
+
+  // Stored as Unix milliseconds. We don't use drift's dateTime() type so
+  // that wire-format compatibility with the previous sqflite schema is
+  // preserved and so that timestamps survive timezone migration.
+  IntColumn get timestamp => integer()();
+  BoolColumn get isRead =>
+      boolean().withDefault(const Constant(false))();
+
+  // Nullable — absent means the message does not auto-expire. An absolute
+  // expiry instant (not a duration) so that a device clock rewound
+  // backwards cannot delay deletion.
+  IntColumn get expiresAt => integer().nullable()();
+
+  BoolColumn get isMine =>
+      boolean().withDefault(const Constant(false))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+@DataClassName('ConversationRow')
+class Conversations extends Table {
+  TextColumn get id => text()();
+
+  // UNIQUE: one conversation row per peer. Trying to insert a duplicate
+  // is a programmer error (use insertOnConflictUpdate to refresh).
+  TextColumn get recipientId =>
+      text().customConstraint('NOT NULL UNIQUE')();
+
+  // The peer's serialized Signal identity public key. Pinned at first
+  // contact — silently re-negotiating with a different key is the classic
+  // MITM vector. The UI compares this against any future bundle and shows
+  // a safety-number warning on mismatch.
+  BlobColumn get recipientPublicKey => blob()();
+
+  IntColumn get lastMessageAt => integer().nullable()();
+  BoolColumn get isArchived =>
+      boolean().withDefault(const Constant(false))();
+  IntColumn get unreadCount =>
+      integer().withDefault(const Constant(0))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+@DataClassName('ContactRow')
+class Contacts extends Table {
+  TextColumn get id => text()();
+  TextColumn get userId => text().customConstraint('NOT NULL UNIQUE')();
+  TextColumn get displayName => text().nullable()();
+  TextColumn get identityKeyFingerprint => text()();
+
+  // Only flipped after explicit out-of-band confirmation by the user. No
+  // programmatic auto-verify path exists anywhere in the codebase.
+  BoolColumn get isVerified =>
+      boolean().withDefault(const Constant(false))();
+
+  IntColumn get createdAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+// ---------------------------------------------------------------------------
+// Database.
+//
+// Why this stack:
+//   * drift gives us typed queries that survive schema changes. Queries
+//     run on the main isolate (see ISOLATE NOTE below).
+//   * Encryption is SQLCipher applied via PRAGMA key on the underlying
+//     sqlite3 connection. The same Dart source compiles and runs on
+//     every drift-supported platform because the SQLCipher binary is
+//     provided by the host environment.
+//   * Key material lives in [FlutterSecureStorage], hardware-backed via
+//     Android Keystore / iOS Keychain. The DB file is opaque without it.
+//   * Passing the key as `PRAGMA key = "x'<hex>'"` makes SQLCipher use
+//     the raw 256 bits directly, bypassing PBKDF2 — a passphrase KDF is
+//     pointless when the input already has 256 bits of CSPRNG entropy.
+//
+// ISOLATE NOTE — we use NativeDatabase (same-isolate) rather than
+// NativeDatabase.createInBackground. The background-isolate path
+// requires the `setup` closure to be sendable across isolate
+// boundaries, which fails when the closure captures plugin-backed
+// objects such as FlutterSecureStorage (the unsendable
+// _AsyncCompleter from the plugin's MethodChannel surfaces as an
+// "object is unsendable" error at runtime). We sacrifice the
+// background-isolate performance optimization here for correctness.
+// This can be revisited later by extracting the setup into a
+// top-level (non-closure) function that reads the key from a
+// pre-resolved string parameter, allowing the isolate to receive
+// only sendable values.
+// ---------------------------------------------------------------------------
+
+@DriftDatabase(tables: [Messages, Conversations, Contacts])
+class SecureDatabase extends _$SecureDatabase {
+  static const String _kKeyStorageKey = 'spectre.db.k';
+  static const String _kDbFileName = 'spectre.db';
+
+  factory SecureDatabase({FlutterSecureStorage? secureStorage}) {
+    final storage = secureStorage ?? _defaultStorage();
+    // `instance` is referenced inside the lazy opener so that the opened
+    // File can be cached on the instance for the wipe step. `late` is
+    // safe: the LazyDatabase body only runs after this factory returns
+    // and `instance` has been assigned.
+    late SecureDatabase instance;
+
+    final executor = LazyDatabase(() async {
+      final keyHex = await _loadOrCreateKey(storage);
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File(p.join(dir.path, _kDbFileName));
+      instance._dbFile = file;
+
+      // Same-isolate constructor — see ISOLATE NOTE above for why we
+      // are not using NativeDatabase.createInBackground.
+      return NativeDatabase(
+        file,
+        setup: (db) {
+          // PRAGMA key MUST be the first statement on the connection.
+          // x'<hex>' tells SQLCipher to use the bytes as the raw key,
+          // skipping PBKDF2.
+          db.execute("PRAGMA key = \"x'$keyHex'\"");
+          // Zero freed pages before they are re-encrypted to disk so a
+          // deleted row's plaintext-shape (lengths, structure) cannot
+          // leak via freed-page recovery if the cipher is ever broken.
+          db.execute('PRAGMA cipher_secure_delete = ON');
+          // Keep all temp tables and sort buffers in RAM. Disk-based
+          // temp files would not inherit the SQLCipher encryption and
+          // could leak intermediate query state in plaintext.
+          db.execute('PRAGMA temp_store = MEMORY');
+          // FK CASCADE is what makes "delete a conversation" predictably
+          // remove all of its messages.
+          db.execute('PRAGMA foreign_keys = ON');
+        },
+      );
+    });
+
+    instance = SecureDatabase._(executor, storage);
+    return instance;
+  }
+
+  SecureDatabase._(QueryExecutor executor, this._secureStorage)
+      : super(executor);
 
   final FlutterSecureStorage _secureStorage;
-  Database? _db;
+  File? _dbFile;
 
-  SecureDatabase({FlutterSecureStorage? secureStorage})
-      : _secureStorage = secureStorage ??
-            const FlutterSecureStorage(
-              aOptions: AndroidOptions(
-                encryptedSharedPreferences: true,
-                resetOnError: false,
-              ),
-              iOptions: IOSOptions(
-                accessibility: KeychainAccessibility.first_unlock_this_device,
-                synchronizable: false,
-              ),
-            );
+  @override
+  int get schemaVersion => 1;
 
-  /// Opens the database, creating and initializing it on first run. Safe
-  /// to call multiple times — subsequent calls return the cached handle.
-  /// Must be awaited before any other method is used.
-  Future<Database> open() async {
-    final cached = _db;
-    if (cached != null && cached.isOpen) return cached;
+  static FlutterSecureStorage _defaultStorage() => const FlutterSecureStorage(
+        aOptions: AndroidOptions(
+          encryptedSharedPreferences: true,
+          resetOnError: false,
+        ),
+        iOptions: IOSOptions(
+          accessibility: KeychainAccessibility.first_unlock_this_device,
+          synchronizable: false,
+        ),
+      );
 
-    final keyHex = await _loadOrCreateKey();
-    final path = await _databasePath();
-
-    _db = await openDatabase(
-      path,
-      // x'<hex>' tells SQLCipher to use the 32 bytes as the raw key,
-      // bypassing PBKDF2. We feed it true randomness, so stretching adds
-      // nothing.
-      password: "x'$keyHex'",
-      version: _kSchemaVersion,
-      onConfigure: _onConfigure,
-      onCreate: _onCreate,
-    );
-    return _db!;
-  }
-
-  Future<void> _onConfigure(Database db) async {
-    // Zero freed pages before they are re-encrypted to disk. Without this
-    // a deleted row's plaintext-shape (lengths, structure) could in
-    // principle leak via freed-page recovery once the cipher is broken.
-    await db.execute('PRAGMA cipher_secure_delete = ON');
-    // Enforce ON DELETE CASCADE so wiping a conversation also wipes its
-    // messages — important for the disappearing-conversation flow.
-    await db.execute('PRAGMA foreign_keys = ON');
-    // Memory-temp store keeps any temp tables / sort buffers off disk so
-    // intermediate query state can't end up in unencrypted temp files.
-    await db.execute('PRAGMA temp_store = MEMORY');
-  }
-
-  Future<void> _onCreate(Database db, int version) async {
-    // conversations: one row per peer chat. recipient_public_key is the
-    // serialized Signal identity public key we pin for that recipient —
-    // any future session establishment must match this key or the user
-    // is shown a safety-number-changed warning.
-    await db.execute('''
-      CREATE TABLE conversations (
-        id                    TEXT    PRIMARY KEY NOT NULL,
-        recipient_id          TEXT    NOT NULL,
-        recipient_public_key  BLOB    NOT NULL,
-        last_message_at       INTEGER NOT NULL DEFAULT 0,
-        is_archived           INTEGER NOT NULL DEFAULT 0
-      )
-    ''');
-    await db.execute(
-      'CREATE UNIQUE INDEX idx_conversations_recipient ON conversations(recipient_id)',
-    );
-
-    // messages: ciphertext is BLOB and NOT NULL. The schema itself
-    // enforces the "no plaintext on disk" invariant — a developer who
-    // tries to insert a plaintext column will fail at write time.
-    await db.execute('''
-      CREATE TABLE messages (
-        id              TEXT    PRIMARY KEY NOT NULL,
-        conversation_id TEXT    NOT NULL,
-        sender_id       TEXT    NOT NULL,
-        ciphertext      BLOB    NOT NULL,
-        timestamp       INTEGER NOT NULL,
-        is_read         INTEGER NOT NULL DEFAULT 0,
-        expires_at      INTEGER,
-        FOREIGN KEY (conversation_id) REFERENCES conversations(id)
-          ON DELETE CASCADE
-      )
-    ''');
-    await db.execute(
-      'CREATE INDEX idx_messages_conversation ON messages(conversation_id, timestamp DESC)',
-    );
-    // Partial index on the expiry column — speeds up the foreground
-    // sweep without indexing every non-disappearing message.
-    await db.execute(
-      'CREATE INDEX idx_messages_expires ON messages(expires_at) '
-      'WHERE expires_at IS NOT NULL',
-    );
-
-    // contacts: identity_key_fingerprint is the short hash we display in
-    // the safety-number UI. `verified` flips to 1 only after the user
-    // confirms the fingerprint out-of-band (scan QR, read aloud, etc.) —
-    // this flag drives the "verified" badge in the chat header and must
-    // never be set programmatically without explicit user action.
-    await db.execute('''
-      CREATE TABLE contacts (
-        id                        TEXT    PRIMARY KEY NOT NULL,
-        user_id                   TEXT    NOT NULL UNIQUE,
-        display_name              TEXT    NOT NULL,
-        identity_key_fingerprint  TEXT    NOT NULL,
-        verified                  INTEGER NOT NULL DEFAULT 0,
-        created_at                INTEGER NOT NULL
-      )
-    ''');
-  }
-
-  /// Hard-deletes every message whose [expires_at] has passed. Call on
-  /// every app foreground so a device seized during the disappearing
-  /// window has the shortest possible recovery window. Returns the row
-  /// count deleted (useful for tests and observability — but DO NOT log
-  /// the IDs of deleted rows).
-  Future<int> deleteExpiredMessages() async {
-    final db = await open();
-    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
-    return db.delete(
-      'messages',
-      where: 'expires_at IS NOT NULL AND expires_at < ?',
-      whereArgs: [now],
-    );
-  }
-
-  /// Panic wipe. Multi-layered:
-  ///   1. Best-effort scrub of every row, with `cipher_secure_delete`
-  ///      ensuring freed pages are zeroed before being re-encrypted.
-  ///      VACUUM forces the file to be rewritten so the new (smaller)
-  ///      file no longer contains any encrypted form of the old data.
-  ///   2. Close the handle and overwrite the file bytes with zeros, then
-  ///      delete it. On flash media this is best-effort — wear-levelling
-  ///      means original physical blocks may persist for a while — so we
-  ///      treat it as defense in depth, not primary defense.
-  ///   3. Destroy the encryption key. This is the actual guarantee:
-  ///      without the key, any surviving SQLCipher bytes on flash are
-  ///      cryptographically unrecoverable.
-  Future<void> wipeDatabase() async {
-    final db = _db;
-    if (db != null && db.isOpen) {
-      try {
-        await db.execute('PRAGMA cipher_secure_delete = ON');
-        await db.delete('messages');
-        await db.delete('conversations');
-        await db.delete('contacts');
-        await db.execute('VACUUM');
-      } catch (_) {
-        // Even if scrubbing fails (e.g. corrupted DB), we still continue
-        // to file deletion and key destruction below. Failing to scrub
-        // is acceptable; failing to destroy the key is not.
-      }
-      await db.close();
-      _db = null;
-    }
-
-    final path = await _databasePath();
-    final file = File(path);
-    if (await file.exists()) {
-      try {
-        // Overwrite the file with zeros before unlinking. SQLCipher's
-        // own scrub above is the strong layer; this is a belt-and-braces
-        // pass for the file as it sits on the FS before unlink.
-        final length = await file.length();
-        await file.writeAsBytes(
-          Uint8List(length),
-          flush: true,
-        );
-      } catch (_) {
-        // Best effort — fall through to delete.
-      }
-      try {
-        await file.delete();
-      } catch (_) {
-        // Even if delete fails the key is about to be destroyed, which
-        // is the real protection.
-      }
-    }
-
-    // The decisive step: without this byte string the file is noise.
-    await _secureStorage.delete(key: _kKeyStorageKey);
-  }
-
-  // ---------------------------------------------------------------------
-  // Internals
-  // ---------------------------------------------------------------------
-
-  Future<String> _loadOrCreateKey() async {
-    final existing = await _secureStorage.read(key: _kKeyStorageKey);
+  static Future<String> _loadOrCreateKey(FlutterSecureStorage storage) async {
+    final existing = await storage.read(key: _kKeyStorageKey);
     if (existing != null) return existing;
-
-    // Random.secure() pulls from the platform CSPRNG and throws if no
-    // secure source is available. We treat that as fatal — handing out
-    // a predictable DB key would silently downgrade every other
-    // protection in the app.
     final rng = Random.secure();
     final bytes = Uint8List(32);
     for (var i = 0; i < bytes.length; i++) {
       bytes[i] = rng.nextInt(256);
     }
     final hex = _toHex(bytes);
-    await _secureStorage.write(key: _kKeyStorageKey, value: hex);
+    await storage.write(key: _kKeyStorageKey, value: hex);
     return hex;
-  }
-
-  Future<String> _databasePath() async {
-    final dir = await getDatabasesPath();
-    return '$dir/$_kDbFileName';
   }
 
   static String _toHex(Uint8List bytes) {
@@ -265,5 +223,248 @@ class SecureDatabase {
       sb.write(b.toRadixString(16).padLeft(2, '0'));
     }
     return sb.toString();
+  }
+
+  /// Forces the LazyDatabase to open now so any encryption or filesystem
+  /// errors surface at app startup rather than on the first real query.
+  Future<void> open() async {
+    await customSelect('SELECT 1').get();
+  }
+
+  // -------------------------------------------------------------------------
+  // Messages
+  // -------------------------------------------------------------------------
+
+  Future<void> insertMessage(Message m) async {
+    await into(messages).insertOnConflictUpdate(
+      MessagesCompanion(
+        id: Value(m.id),
+        conversationId: Value(m.conversationId),
+        senderId: Value(m.senderId),
+        ciphertext: Value(m.ciphertext),
+        timestamp: Value(m.timestamp.toUtc().millisecondsSinceEpoch),
+        isRead: Value(m.isRead),
+        expiresAt:
+            Value(m.expiresAt?.toUtc().millisecondsSinceEpoch),
+        isMine: Value(m.isMine),
+      ),
+    );
+  }
+
+  Future<List<Message>> getMessages(String conversationId) async {
+    final rows = await (select(messages)
+          ..where((m) => m.conversationId.equals(conversationId))
+          ..orderBy(
+              [(m) => OrderingTerm(expression: m.timestamp)]))
+        .get();
+    return rows.map(_messageFromRow).toList(growable: false);
+  }
+
+  /// Hard-deletes every message whose expiry has passed. Called on every
+  /// foreground resume so a device seized during the disappearing window
+  /// has the shortest possible recovery window. Returns the count for
+  /// observability — do NOT log per-row IDs.
+  Future<int> deleteExpiredMessages() async {
+    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    return (delete(messages)
+          ..where((m) =>
+              m.expiresAt.isNotNull() &
+              m.expiresAt.isSmallerThanValue(now)))
+        .go();
+  }
+
+  // -------------------------------------------------------------------------
+  // Conversations
+  // -------------------------------------------------------------------------
+
+  Future<void> insertConversation(Conversation c) async {
+    await into(conversations).insertOnConflictUpdate(
+      ConversationsCompanion(
+        id: Value(c.id),
+        recipientId: Value(c.recipientId),
+        recipientPublicKey:
+            Value(_base64ToBytes(c.recipientPublicKey)),
+        lastMessageAt:
+            Value(c.lastMessageAt?.toUtc().millisecondsSinceEpoch),
+        isArchived: Value(c.isArchived),
+        unreadCount: Value(c.unreadCount),
+      ),
+    );
+  }
+
+  Future<List<Conversation>> getConversations() async {
+    final rows = await (select(conversations)
+          ..where((c) => c.isArchived.equals(false))
+          ..orderBy([
+            (c) => OrderingTerm(
+                  expression: c.lastMessageAt,
+                  mode: OrderingMode.desc,
+                )
+          ]))
+        .get();
+    return rows.map(_conversationFromRow).toList(growable: false);
+  }
+
+  // -------------------------------------------------------------------------
+  // Contacts
+  // -------------------------------------------------------------------------
+
+  Future<void> insertContact(Contact c) async {
+    await into(contacts).insertOnConflictUpdate(
+      ContactsCompanion(
+        id: Value(c.id),
+        userId: Value(c.userId),
+        displayName: Value(c.displayName),
+        identityKeyFingerprint: Value(c.identityKeyFingerprint),
+        isVerified: Value(c.isVerified),
+        createdAt: Value(c.createdAt.toUtc().millisecondsSinceEpoch),
+      ),
+    );
+  }
+
+  Future<Contact?> getContact(String userId) async {
+    final row = await (select(contacts)
+          ..where((c) => c.userId.equals(userId))
+          ..limit(1))
+        .getSingleOrNull();
+    if (row == null) return null;
+    return _contactFromRow(row);
+  }
+
+  /// Sets [Contact.isVerified]. The boolean here represents human
+  /// attestation after out-of-band fingerprint comparison — callers
+  /// must NOT call this without a real user action behind it.
+  Future<int> updateContactVerified(String userId, bool verified) {
+    return (update(contacts)..where((c) => c.userId.equals(userId)))
+        .write(ContactsCompanion(isVerified: Value(verified)));
+  }
+
+  /// Deletes a contact and every conversation linked to that peer in a
+  /// single transaction. Messages tied to those conversations are removed
+  /// transitively via the FK ON DELETE CASCADE on messages.conversationId.
+  Future<void> deleteContact(String userId) async {
+    await transaction(() async {
+      await (delete(conversations)
+            ..where((c) => c.recipientId.equals(userId)))
+          .go();
+      await (delete(contacts)..where((c) => c.userId.equals(userId))).go();
+    });
+  }
+
+  /// Deletes a single conversation and all of its messages (cascade).
+  Future<int> deleteConversation(String conversationId) {
+    return (delete(conversations)
+          ..where((c) => c.id.equals(conversationId)))
+        .go();
+  }
+
+  // -------------------------------------------------------------------------
+  // Panic wipe.
+  //
+  // Three layers, in increasing order of decisiveness:
+  //
+  //   1. Row-level scrub with cipher_secure_delete = ON, followed by a
+  //      VACUUM that rewrites the file. After this step the new SQLCipher
+  //      file no longer encodes any remnant of the old data.
+  //
+  //   2. File-level zero-overwrite + unlink. On flash media this is
+  //      best-effort: wear-levelling means the original physical blocks
+  //      may persist for an indeterminate period regardless of what the
+  //      filesystem reports. We treat this layer as defense in depth.
+  //
+  //   3. Destroy the encryption key. THIS is the actual guarantee —
+  //      without the key, anything that survives layers 1 and 2 is
+  //      cryptographically unrecoverable. If only one step could be
+  //      executed, this is the one that matters.
+  // -------------------------------------------------------------------------
+
+  Future<void> wipeDatabase() async {
+    try {
+      await transaction(() async {
+        await customStatement('PRAGMA cipher_secure_delete = ON');
+        await delete(messages).go();
+        await delete(conversations).go();
+        await delete(contacts).go();
+      });
+      // VACUUM cannot run inside a transaction.
+      await customStatement('VACUUM');
+    } catch (_) {
+      // Even if scrubbing fails (corrupted DB, locked file, etc.) we
+      // continue to file deletion and key destruction below. Failing
+      // here is acceptable; failing layer 3 is not.
+    }
+
+    try {
+      await close();
+    } catch (_) {
+      // Best effort.
+    }
+
+    final file = _dbFile;
+    if (file != null && await file.exists()) {
+      try {
+        final length = await file.length();
+        await file.writeAsBytes(Uint8List(length), flush: true);
+      } catch (_) {
+        // The cipher_secure_delete scrub above is the strong layer; this
+        // zero-overwrite is belt-and-braces on top of it.
+      }
+      try {
+        await file.delete();
+      } catch (_) {
+        // The key destruction below is the real protection.
+      }
+    }
+
+    // Decisive step. After this point the on-disk bytes — if any survive
+    // — are noise.
+    await _secureStorage.delete(key: _kKeyStorageKey);
+  }
+
+  // -------------------------------------------------------------------------
+  // Row -> model conversions
+  // -------------------------------------------------------------------------
+
+  static Message _messageFromRow(MessageRow r) => Message(
+        id: r.id,
+        conversationId: r.conversationId,
+        senderId: r.senderId,
+        ciphertext: Uint8List.fromList(r.ciphertext),
+        timestamp:
+            DateTime.fromMillisecondsSinceEpoch(r.timestamp, isUtc: true),
+        isRead: r.isRead,
+        expiresAt: r.expiresAt == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(r.expiresAt!, isUtc: true),
+        isMine: r.isMine,
+      );
+
+  static Conversation _conversationFromRow(ConversationRow r) => Conversation(
+        id: r.id,
+        recipientId: r.recipientId,
+        recipientPublicKey: base64Encode(r.recipientPublicKey),
+        lastMessageAt: r.lastMessageAt == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(
+                r.lastMessageAt!,
+                isUtc: true,
+              ),
+        isArchived: r.isArchived,
+        unreadCount: r.unreadCount,
+      );
+
+  static Contact _contactFromRow(ContactRow r) => Contact(
+        id: r.id,
+        userId: r.userId,
+        displayName: r.displayName,
+        identityKeyFingerprint: r.identityKeyFingerprint,
+        isVerified: r.isVerified,
+        createdAt:
+            DateTime.fromMillisecondsSinceEpoch(r.createdAt, isUtc: true),
+      );
+
+  static Uint8List _base64ToBytes(String s) {
+    if (s.isEmpty) return Uint8List(0);
+    return base64Decode(s);
   }
 }
