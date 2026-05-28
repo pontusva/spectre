@@ -1,13 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'dart:typed_data';
 
-import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'package:web_socket_channel/status.dart' as ws_status;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../core/crypto/identity_manager.dart';
+import '../../core/crypto/relay_auth_manager.dart';
+import 'prekey_service.dart';
 
 /// Coarse state of the relay connection, surfaced to the UI so it can
 /// show a "reconnecting…" banner instead of failing silently.
@@ -51,17 +51,20 @@ enum RelayConnectionState {
 ///
 /// Authentication design (no passwords, no tokens):
 ///   * On TCP connect the server sends a one-time random nonce.
-///   * The client signs the nonce with the device's long-term
-///     [IdentityKeyPair] private half (Curve25519) and replies with
-///     `(user_id, public_identity_key, signature)`.
+///   * The client signs the nonce with a dedicated **relay-auth**
+///     Ed25519 private key (see [RelayAuthManager]) and replies with
+///     `(user_id, identity_public_key, signature)`.
 ///   * The server verifies the signature against the supplied public
 ///     key, then checks that the public key matches the one it has on
 ///     file for `user_id` (or, on first contact, pins it).
 ///   * Nothing crosses the wire that could be replayed against another
 ///     server, and nothing is stored on disk that an attacker who
-///     dumps the device could use to log in as us forever. The only
-///     long-lived secret is the identity private key, which is in the
-///     Keystore and is the same key we already trust for E2E.
+///     dumps the device could use to log in as us forever.
+///   * The relay-auth key is INTENTIONALLY separate from the libsignal
+///     IdentityKeyPair: libsignal's identity is Curve25519/XEdDSA, and
+///     the Go relay verifies plain Ed25519 (golang.org/x/crypto has
+///     no XEdDSA support). Decoupling also gives us domain separation:
+///     a relay-auth key compromise does not compromise Signal sessions.
 class RelayService {
   /// Maximum number of automatic reconnect attempts before we give up
   /// and surface a `failed` state. The user can then manually retry —
@@ -72,6 +75,7 @@ class RelayService {
 
   final Uri _relayUrl;
   final IdentityManager _identityManager;
+  final RelayAuthManager _relayAuthManager;
   final Random _rng = Random();
 
   WebSocketChannel? _channel;
@@ -81,6 +85,16 @@ class RelayService {
   int _reconnectAttempts = 0;
   bool _wiped = false;
   RelayConnectionState _state = RelayConnectionState.disconnected;
+
+  // PrekeyService is wired in AFTER construction via attachPrekeyService.
+  // The two services have a mutual dependency — PrekeyService needs the
+  // RelayService to send control frames, RelayService needs the
+  // PrekeyService to publish on auth — and constructor-injecting the
+  // RelayService into PrekeyService is the half of the cycle that's
+  // natural to express in Dart. We close the cycle with this setter
+  // instead of late-init so a test or alternate composition can opt out
+  // entirely (passing null is fine; uploadBundle just won't run).
+  PrekeyService? _prekeyService;
 
   final StreamController<Map<String, dynamic>> _incomingController =
       StreamController<Map<String, dynamic>>.broadcast();
@@ -94,8 +108,10 @@ class RelayService {
   RelayService({
     required Uri relayUrl,
     required IdentityManager identityManager,
+    required RelayAuthManager relayAuthManager,
   })  : _relayUrl = relayUrl,
-        _identityManager = identityManager;
+        _identityManager = identityManager,
+        _relayAuthManager = relayAuthManager;
 
   /// Inbound messages from the relay, already JSON-decoded. The UI
   /// layer subscribes here to feed [SessionManager.decryptMessage].
@@ -134,7 +150,38 @@ class RelayService {
       );
       await _authCompleter!.future.timeout(_kAuthTimeout);
       _reconnectAttempts = 0;
-      _setState(RelayConnectionState.connected);
+
+      // CRITICAL ORDERING — DO NOT REARRANGE.
+      //
+      // _state MUST be `connected` before we hand control off to
+      // uploadBundle. sendControlFrame gates on `_state == connected`
+      // and silently drops frames otherwise. If the state assignment
+      // ran after the unawaited dispatch, uploadBundle's
+      // register_prekeys frame would be eaten on the very first
+      // connect of every cold start — exactly the race we observed
+      // in the field. We inline the assignment here (rather than
+      // routing through _setState) so a future refactor that swaps
+      // _setState for something async cannot quietly reintroduce
+      // the race; the synchronous write is right above the dispatch
+      // and lexically impossible to reorder.
+      _state = RelayConnectionState.connected;
+      if (!_stateController.isClosed) {
+        _stateController.add(_state);
+      }
+
+      // Now safe to fire-and-forget the bundle publish: _state is
+      // committed, so any sendControlFrame inside uploadBundle will
+      // be admitted. unawaited because a slow keystore read should
+      // not block the connect() Future — re-uploading on every
+      // reconnect makes the operation self-healing if any single
+      // attempt fails.
+      final ps = _prekeyService;
+      if (ps != null) {
+        unawaited(ps.uploadBundle().catchError((_) {
+          // Swallow: bundle upload failures must not surface to the
+          // UI as connect errors. The next reconnect retries.
+        }));
+      }
     } catch (_) {
       // Any error during connect or auth — schedule a retry. We
       // deliberately do not surface the specific error reason on the
@@ -147,6 +194,12 @@ class RelayService {
   }
 
   void _handleFrame(dynamic raw) {
+    // TEMPORARY DEBUG: dump every inbound frame so we can see the
+    // exact read/write sequence in the auth handshake. Remove once
+    // the Dart/Go protocol mismatch is closed out.
+    // ignore: avoid_print
+    print('WS READ <- ${raw is String ? raw : raw.runtimeType}');
+
     final Map<String, dynamic> msg;
     try {
       if (raw is! String) return;
@@ -160,7 +213,39 @@ class RelayService {
       return;
     }
 
+    // The Go relay's protocol does NOT tag frames with a `type` field —
+    // Challenge is `{"nonce":...}`, AuthResponse is `{"success":...,"error":...}`,
+    // and delivered messages carry envelope fields. Dispatch by shape:
+    // whichever required field is present tells us what stage of the
+    // handshake we're in. The legacy `type`-based cases below remain as
+    // a fallback for forward compatibility with a future tagged variant.
     final type = msg['type'];
+    if (type == null) {
+      if (msg.containsKey('nonce')) {
+        unawaited(_respondToChallenge(msg));
+        return;
+      }
+      if (msg.containsKey('success')) {
+        final ok = msg['success'] == true;
+        if (!(_authCompleter?.isCompleted ?? true)) {
+          if (ok) {
+            _authCompleter!.complete();
+          } else {
+            _authCompleter!.completeError(
+              StateError('relay rejected authentication'),
+            );
+          }
+        }
+        return;
+      }
+      if (msg.containsKey('ciphertext') || msg.containsKey('recipient_id')) {
+        if (!_incomingController.isClosed) {
+          _incomingController.add(msg);
+        }
+        return;
+      }
+      return;
+    }
     switch (type) {
       case 'challenge':
         unawaited(_respondToChallenge(msg));
@@ -191,35 +276,59 @@ class RelayService {
 
   Future<void> _respondToChallenge(Map<String, dynamic> challenge) async {
     try {
+      // TEMPORARY DEBUG: confirm the challenge dispatch fired and
+      // dump the raw frame so we can verify field naming. Remove
+      // along with the rest of the auth-debug instrumentation.
+      // ignore: avoid_print
+      print('CHALLENGE RECEIVED');
+      // ignore: avoid_print
+      print(jsonEncode(challenge));
+
       final nonceB64 = challenge['nonce'];
       if (nonceB64 is! String) {
         throw const FormatException('challenge missing nonce');
       }
       final nonce = base64Decode(nonceB64);
 
+      // user_id comes from IdentityManager: it is the addressable handle
+      // on the relay and is shared with the Signal identity. The
+      // Ed25519 keypair used to AUTHENTICATE that handle, however,
+      // comes from RelayAuthManager — independent of Signal sessions.
+      // See RelayAuthManager for the rationale (libsignal uses
+      // XEdDSA/Curve25519 which the Go relay cannot verify).
       final identity = await _identityManager.loadOrCreate();
+      final signature = await _relayAuthManager.sign(nonce);
+      final identityPublicKey = await _relayAuthManager.publicKeyBase64();
 
-      // Sign the server's nonce with our Curve25519 identity private
-      // key. The server verifies against the public key we include in
-      // the response (and against its own pinned copy of that key for
-      // this user_id, if any). No bearer tokens, no passwords — the
-      // only credential is possession of the key that already roots
-      // every Signal session for this device.
-      final signature = Curve.calculateSignature(
-        identity.identityKeyPair.getPrivateKey(),
-        nonce,
-      );
-
+      // The relay's AuthRequest struct has no `type` field — it
+      // identifies the frame by the stage of the conversation, not by
+      // a tagged-union discriminator. Sending an extra `type` is
+      // harmless (Go's json decoder ignores unknown fields by default)
+      // but we omit it so the wire shape is exactly what the server
+      // contract specifies.
       final response = <String, Object>{
-        'type': 'auth',
         'user_id': identity.userId,
-        'identity_key': base64Encode(
-          identity.identityKeyPair.getPublicKey().serialize(),
-        ),
+        // Field name matches the relay's AuthRequest.IdentityPublicKey
+        // (json tag `identity_public_key`). Renaming this here without
+        // updating the relay would silently break auth on every device.
+        'identity_public_key': identityPublicKey,
         'signature': base64Encode(signature),
       };
+
+      // TEMPORARY DEBUG: dump the keys only — values would expose the
+      // user_id and the live public key, both of which are PII-adjacent.
+      // ignore: avoid_print
+      print('AUTH REQUEST BUILT');
+      // ignore: avoid_print
+      print(response.keys.toList());
+
       _channel?.sink.add(jsonEncode(response));
+
+      // ignore: avoid_print
+      print('AUTH REQUEST SENT');
     } catch (e) {
+      // ignore: avoid_print
+      print('AUTH ERROR: ${e.runtimeType}');
       if (!(_authCompleter?.isCompleted ?? true)) {
         _authCompleter!.completeError(e);
       }
@@ -273,7 +382,36 @@ class RelayService {
     _channel?.sink.add(jsonEncode(envelope));
   }
 
+  /// Wires the PrekeyService that will be invoked after each successful
+  /// auth handshake. Pass null to detach (used by tests). Safe to call
+  /// before [connect]; the reference is consulted at auth-complete time.
+  void attachPrekeyService(PrekeyService? service) {
+    _prekeyService = service;
+  }
+
+  /// Sends a structured control frame over the authenticated WebSocket.
+  /// Used by PrekeyService for register_prekeys; intentionally a thin
+  /// pass-through so this class doesn't need to grow per-control-type
+  /// methods. Callers MUST only invoke this after the connection has
+  /// reached [RelayConnectionState.connected]; sending before auth
+  /// completes will either be dropped by the relay or rejected.
+  ///
+  /// Frames are JSON-encoded as-is. No automatic `type` injection —
+  /// the caller controls the wire shape so this stays usable for the
+  /// (currently tagged) control plane and any future untagged frames.
+  void sendControlFrame(Map<String, Object?> frame) {
+    if (_state != RelayConnectionState.connected) {
+      // Silent drop. Surfacing an error here would let timing of
+      // control-frame failures become a side channel; the next
+      // reconnect's post-auth hook will re-run uploadBundle anyway.
+      return;
+    }
+    _channel?.sink.add(jsonEncode(frame));
+  }
+
   void _handleStreamError(Object error, StackTrace _) {
+    // ignore: avoid_print
+    print('AUTH ERROR: ${error.runtimeType}');
     if (!(_authCompleter?.isCompleted ?? true)) {
       _authCompleter!.completeError(error);
     }
@@ -281,6 +419,8 @@ class RelayService {
   }
 
   void _handleStreamDone() {
+    // ignore: avoid_print
+    print('AUTH ERROR: StreamDone');
     if (!(_authCompleter?.isCompleted ?? true)) {
       _authCompleter!.completeError(
         StateError('relay closed during auth'),

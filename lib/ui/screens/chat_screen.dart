@@ -4,9 +4,11 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import '../../core/crypto/session_manager.dart';
 import '../../core/models/message.dart';
 import '../../core/storage/secure_database.dart';
 import '../../services/message_service.dart';
+import '../../services/network/prekey_service.dart';
 import '../theme/app_theme.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -17,6 +19,8 @@ class ChatScreen extends StatefulWidget {
     required this.currentUserId,
     required this.messageService,
     required this.database,
+    required this.prekeyService,
+    required this.sessionManager,
   });
 
   final String conversationId;
@@ -24,9 +28,28 @@ class ChatScreen extends StatefulWidget {
   final String currentUserId;
   final MessageService messageService;
   final SecureDatabase database;
+  final PrekeyService prekeyService;
+  final SessionManager sessionManager;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
+}
+
+// Discrete states the session bootstrap can be in. Drives the visible
+// banner / error UI in the composer area. Kept tiny on purpose: every
+// state must correspond to a distinct user-visible affordance.
+enum _SessionState {
+  // No session yet; we'll attempt fetch on first send. UI is normal.
+  uninitialized,
+  // Fetching bundle and running processPreKeyBundle. Composer disabled.
+  negotiating,
+  // Session up — proceed normally.
+  ready,
+  // Relay returned 404 for the peer — they've never registered. UI shows
+  // the cold-grey "peer not found" affordance and disables sending.
+  peerNotFound,
+  // Fetch or session init threw. We allow a retry on the next send.
+  transientError,
 }
 
 class _ChatScreenState extends State<ChatScreen> {
@@ -38,6 +61,7 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription<DecryptedMessage>? _sub;
   bool _sending = false;
   bool _loading = true;
+  _SessionState _sessionState = _SessionState.uninitialized;
 
   String get _truncatedRecipient {
     final r = widget.recipientId;
@@ -119,9 +143,61 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  /// Ensures a Signal session exists with the peer before the first
+  /// send, fetching a fresh prekey bundle and running X3DH if not.
+  ///
+  /// Returns true if the caller may proceed to encrypt+send. False
+  /// means we set a terminal session state (peerNotFound / transient
+  /// error) and the composer should NOT call sendMessage.
+  ///
+  /// Idempotent: subsequent calls after a ready state are O(1) — the
+  /// SessionManager.hasSession check short-circuits everything else.
+  Future<bool> _ensureSession() async {
+    if (await widget.sessionManager.hasSession(widget.recipientId)) {
+      if (_sessionState != _SessionState.ready) {
+        setState(() => _sessionState = _SessionState.ready);
+      }
+      return true;
+    }
+    setState(() => _sessionState = _SessionState.negotiating);
+    try {
+      final bundle =
+          await widget.prekeyService.fetchBundle(widget.recipientId);
+      if (bundle == null) {
+        // 404 from the relay — peer has never registered a bundle.
+        // This is the one error class the user should see explicitly,
+        // because retrying won't help until the peer comes online and
+        // publishes their bundle. Distinct from "transient error" so
+        // we can render the cold-grey affordance the spec calls for.
+        if (mounted) {
+          setState(() => _sessionState = _SessionState.peerNotFound);
+        }
+        return false;
+      }
+      await widget.sessionManager
+          .initializeSession(widget.recipientId, bundle);
+      if (mounted) {
+        setState(() => _sessionState = _SessionState.ready);
+      }
+      return true;
+    } catch (_) {
+      // Any other failure — network, malformed bundle, libsignal
+      // rejection of the signed-prekey signature — we treat as
+      // transient. The user can retry by sending again. We
+      // deliberately do NOT surface the underlying exception class
+      // to the UI: a "signature rejected" error vs. "network down"
+      // error would be a verification oracle for a hostile relay.
+      if (mounted) {
+        setState(() => _sessionState = _SessionState.transientError);
+      }
+      return false;
+    }
+  }
+
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _sending) return;
+    if (_sessionState == _SessionState.peerNotFound) return;
     _input.clear();
     final localId = 'local-${DateTime.now().microsecondsSinceEpoch}';
     final timestamp = DateTime.now().toUtc();
@@ -138,6 +214,24 @@ class _ChatScreenState extends State<ChatScreen> {
       ));
     });
     _scrollToBottom();
+
+    // Block the send on session init. If init fails we DO NOT silently
+    // queue the plaintext — that would defeat the panic-wipe invariant
+    // (no plaintext lingers without a deliverable session).
+    final ok = await _ensureSession();
+    if (!ok) {
+      if (!mounted) return;
+      setState(() {
+        _sending = false;
+        for (var i = 0; i < _items.length; i++) {
+          if (_items[i].id == localId) {
+            _items[i] = _items[i].copyWith(status: _Status.failed);
+            break;
+          }
+        }
+      });
+      return;
+    }
 
     MessageStatus result;
     try {
@@ -190,11 +284,14 @@ class _ChatScreenState extends State<ChatScreen> {
             children: <Widget>[
               const _SessionMetaBar(),
               Expanded(child: _buildList()),
+              if (_sessionState == _SessionState.peerNotFound)
+                const _PeerNotFoundBanner(),
               _ComposerBar(
                 controller: _input,
                 focusNode: _inputFocus,
                 onSend: _send,
-                sending: _sending,
+                sending: _sending ||
+                    _sessionState == _SessionState.peerNotFound,
               ),
             ],
           ),
@@ -236,6 +333,39 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _sameDay(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;
+}
+
+/// Cold-grey monospace affordance shown when the relay returns 404 on
+/// the peer's prekey bundle. Deliberately not a SnackBar / toast: the
+/// spec wants the state to be PERSISTENT and visible until the user
+/// navigates away, because retrying client-side won't help until the
+/// peer registers — surfacing this as a transient toast would let the
+/// user keep typing into a dead-letter compose box.
+class _PeerNotFoundBanner extends StatelessWidget {
+  const _PeerNotFoundBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      decoration: const BoxDecoration(
+        color: SpectreColors.blackLess,
+        border: Border(
+          top: BorderSide(color: SpectreColors.hairline, width: 1),
+          bottom: BorderSide(color: SpectreColors.hairline, width: 1),
+        ),
+      ),
+      child: Text(
+        '[ peer not found on relay ]',
+        style: SpectreTypography.mono().copyWith(
+          color: SpectreColors.textCold,
+          fontSize: 12,
+          letterSpacing: 1.4,
+        ),
+      ),
+    );
+  }
 }
 
 class _SessionMetaBar extends StatelessWidget {

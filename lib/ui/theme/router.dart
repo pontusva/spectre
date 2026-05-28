@@ -3,11 +3,13 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/crypto/identity_manager.dart';
 import '../../core/crypto/prekey_manager.dart';
+import '../../core/crypto/relay_auth_manager.dart';
 import '../../core/crypto/session_manager.dart';
 import '../../core/models/contact.dart';
 import '../../core/models/conversation.dart';
 import '../../core/storage/secure_database.dart';
 import '../../services/message_service.dart';
+import '../../services/network/prekey_service.dart';
 import '../../services/network/relay_service.dart';
 import '../screens/chat_screen.dart';
 import '../screens/conversation_list_screen.dart';
@@ -23,7 +25,9 @@ class SpectreServices {
     this.currentUserId,
     this.preKeyManager,
     this.sessionManager,
+    this.relayAuthManager,
     this.relayService,
+    this.prekeyService,
     this.messageService,
     this.relayUrl,
   });
@@ -37,7 +41,9 @@ class SpectreServices {
   final String? currentUserId;
   final PreKeyManager? preKeyManager;
   final SessionManager? sessionManager;
+  final RelayAuthManager? relayAuthManager;
   final RelayService? relayService;
+  final PrekeyService? prekeyService;
   final MessageService? messageService;
   final Uri? relayUrl;
 }
@@ -242,6 +248,8 @@ class _ChatRouteResolverState extends State<_ChatRouteResolver> {
       currentUserId: svc.currentUserId!,
       messageService: svc.messageService!,
       database: svc.database,
+      prekeyService: svc.prekeyService!,
+      sessionManager: svc.sessionManager!,
     );
   }
 }

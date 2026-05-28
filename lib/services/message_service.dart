@@ -7,10 +7,12 @@ import 'package:uuid/uuid.dart';
 
 import '../core/crypto/identity_manager.dart';
 import '../core/crypto/prekey_manager.dart';
+import '../core/crypto/relay_auth_manager.dart';
 import '../core/crypto/session_manager.dart';
 import '../core/models/conversation.dart';
 import '../core/models/message.dart';
 import '../core/storage/secure_database.dart';
+import 'network/prekey_service.dart';
 import 'network/relay_service.dart';
 
 /// Coarse outcome of a [MessageService.sendMessage] call.
@@ -77,6 +79,13 @@ class MessageService {
   final SessionManager _sessions;
   final SecureDatabase _db;
   final RelayService _relay;
+  final RelayAuthManager _relayAuth;
+  // Held for symmetry with the SpectreServices container and to give
+  // future flows (e.g. on-demand session re-init from inside the send
+  // path) direct access without re-plumbing main.dart. Currently unused
+  // by this class — session-init is driven from the UI layer.
+  // ignore: unused_field
+  final PrekeyService _prekeyService;
 
   final Uuid _uuid;
   final StreamController<DecryptedMessage> _decryptedController =
@@ -106,12 +115,16 @@ class MessageService {
     required SessionManager sessionManager,
     required SecureDatabase database,
     required RelayService relayService,
+    required RelayAuthManager relayAuthManager,
+    required PrekeyService prekeyService,
     Uuid? uuid,
   })  : _identity = identityManager,
         _prekeys = preKeyManager,
         _sessions = sessionManager,
         _db = database,
         _relay = relayService,
+        _relayAuth = relayAuthManager,
+        _prekeyService = prekeyService,
         _uuid = uuid ?? const Uuid() {
     _incomingSub = _relay.incoming.listen(_onRelayFrame);
     _stateSub = _relay.connectionState.listen((state) {
@@ -329,6 +342,15 @@ class MessageService {
 
     try {
       await _prekeys.wipeAll();
+    } catch (_) {/* swallow */}
+
+    // Wipe the relay-auth keypair between prekeys and the DB. Sequencing
+    // matters: prekeys must drop first (so no fresh PreKey bundle can be
+    // posted under the old auth key), and the DB wipe follows so any
+    // queued outbound that referenced the relay session can't be replayed
+    // after a key rotation. Identity goes last regardless — see below.
+    try {
+      await _relayAuth.wipeRelayAuth();
     } catch (_) {/* swallow */}
 
     try {

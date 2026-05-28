@@ -7,9 +7,11 @@ import 'package:go_router/go_router.dart';
 
 import 'core/crypto/identity_manager.dart';
 import 'core/crypto/prekey_manager.dart';
+import 'core/crypto/relay_auth_manager.dart';
 import 'core/crypto/session_manager.dart';
 import 'core/storage/secure_database.dart';
 import 'services/message_service.dart';
+import 'services/network/prekey_service.dart';
 import 'services/network/relay_service.dart';
 import 'ui/theme/app_theme.dart';
 import 'ui/theme/router.dart';
@@ -109,13 +111,33 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
       final preKeyManager = PreKeyManager(identityManager: identityManager);
       await preKeyManager.loadOrCreate();
 
+      // Provision the relay-auth keypair before bringing the websocket
+      // up. A keystore round-trip during the first frame would cost the
+      // auth handshake its 10s timeout budget on cold-storage devices.
+      final relayAuthManager = RelayAuthManager();
+      await relayAuthManager.loadOrCreate();
+
       final sessionManager = await SessionManager.create(identityManager);
 
       final relayUri = Uri.parse(_kRelayUrlRaw);
       final relayService = RelayService(
         relayUrl: relayUri,
         identityManager: identityManager,
+        relayAuthManager: relayAuthManager,
       );
+
+      // PrekeyService closes the cycle between RelayService (control
+      // frames) and PreKeyManager (bundle source). Constructed AFTER
+      // relayService so the constructor can take a non-null reference,
+      // then attached back to relayService via the late-binding setter
+      // so the post-auth hook can fire uploadBundle().
+      final prekeyService = PrekeyService(
+        relayService: relayService,
+        preKeyManager: preKeyManager,
+        identityManager: identityManager,
+        relayUrl: relayUri,
+      );
+      relayService.attachPrekeyService(prekeyService);
 
       final messageService = MessageService(
         identityManager: identityManager,
@@ -123,6 +145,8 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
         sessionManager: sessionManager,
         database: database,
         relayService: relayService,
+        relayAuthManager: relayAuthManager,
+        prekeyService: prekeyService,
       );
 
       // Kick off relay connection in the background. UI is functional
@@ -138,7 +162,9 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
         currentUserId: identity.userId,
         preKeyManager: preKeyManager,
         sessionManager: sessionManager,
+        relayAuthManager: relayAuthManager,
         relayService: relayService,
+        prekeyService: prekeyService,
         messageService: messageService,
         relayUrl: relayUri,
       );

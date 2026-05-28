@@ -24,6 +24,14 @@ dependencies:
 
   # Additional crypto
   pointycastle: ^3.7.3
+  # Pure-Dart RFC 8032 Ed25519. Used by RelayAuthManager so signatures
+  # produced here are byte-identical to Go's ed25519.Sign / ed25519.Verify
+  # on the relay. package:cryptography's Ed25519 was rejected because
+  # its sign() has no opt-out hook for prehashing variants — we need
+  # exact RFC 8032 wire compatibility, not a wrapper that might shift
+  # under us. Already pulled transitively via libsignal_protocol_dart;
+  # pinned explicitly here so a libsignal bump can't surprise-swap it.
+  ed25519_edwards: ^0.1.0
 
   # Navigation
   go_router: ^14.0.0
