@@ -139,6 +139,24 @@ class RelayService {
     try {
       _channel = WebSocketChannel.connect(_relayUrl);
       _authCompleter = Completer<void>();
+
+      // Await the WebSocket upgrade BEFORE listening. connect() is lazy: a
+      // failed handshake — host down, connection refused, or a server that
+      // answers HTTP but never upgrades (e.g. a wrong path) — surfaces on
+      // `ready`. If we don't consume it here, that same error ALSO completes
+      // the sink's `done` future, which nothing awaits, and Dart reports it
+      // as an unhandled zone exception (the "not upgraded to websocket"
+      // crash). Awaiting it inside this try routes the failure straight to
+      // the catch below, which tears down and reconnects like any other drop.
+      // Bounded by the auth timeout so a black-hole host can't hang connect.
+      await _channel!.ready.timeout(_kAuthTimeout);
+
+      // Belt-and-suspenders: the sink's done future also completes with the
+      // terminal socket error on a later drop. Attach a no-op handler so a
+      // late error can't surface unhandled after teardown. Reconnect is still
+      // driven by the stream's onError/onDone below, not by this future.
+      unawaited(_channel!.sink.done.catchError((_) {}));
+
       _channelSub = _channel!.stream.listen(
         _handleFrame,
         onError: _handleStreamError,
@@ -194,12 +212,6 @@ class RelayService {
   }
 
   void _handleFrame(dynamic raw) {
-    // TEMPORARY DEBUG: dump every inbound frame so we can see the
-    // exact read/write sequence in the auth handshake. Remove once
-    // the Dart/Go protocol mismatch is closed out.
-    // ignore: avoid_print
-    print('WS READ <- ${raw is String ? raw : raw.runtimeType}');
-
     final Map<String, dynamic> msg;
     try {
       if (raw is! String) return;
@@ -276,14 +288,6 @@ class RelayService {
 
   Future<void> _respondToChallenge(Map<String, dynamic> challenge) async {
     try {
-      // TEMPORARY DEBUG: confirm the challenge dispatch fired and
-      // dump the raw frame so we can verify field naming. Remove
-      // along with the rest of the auth-debug instrumentation.
-      // ignore: avoid_print
-      print('CHALLENGE RECEIVED');
-      // ignore: avoid_print
-      print(jsonEncode(challenge));
-
       final nonceB64 = challenge['nonce'];
       if (nonceB64 is! String) {
         throw const FormatException('challenge missing nonce');
@@ -315,20 +319,8 @@ class RelayService {
         'signature': base64Encode(signature),
       };
 
-      // TEMPORARY DEBUG: dump the keys only — values would expose the
-      // user_id and the live public key, both of which are PII-adjacent.
-      // ignore: avoid_print
-      print('AUTH REQUEST BUILT');
-      // ignore: avoid_print
-      print(response.keys.toList());
-
       _channel?.sink.add(jsonEncode(response));
-
-      // ignore: avoid_print
-      print('AUTH REQUEST SENT');
     } catch (e) {
-      // ignore: avoid_print
-      print('AUTH ERROR: ${e.runtimeType}');
       if (!(_authCompleter?.isCompleted ?? true)) {
         _authCompleter!.completeError(e);
       }
