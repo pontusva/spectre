@@ -251,7 +251,6 @@ class MessageService {
         'decrypt failed from ${_redactId(senderId)} :: ${e.runtimeType} '
         '-- attempting first-message session init',
       );
-      final senderId = envelope['sender_id'] as String;
       final bundle = await _prekeyService.fetchBundle(senderId);
       if (bundle != null) {
         await _sessions.initializeSession(senderId, bundle);
