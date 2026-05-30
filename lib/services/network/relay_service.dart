@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:web_socket_channel/status.dart' as ws_status;
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -73,6 +74,14 @@ class RelayService {
   static const Duration _kInitialReconnectDelay = Duration(seconds: 1);
   static const Duration _kAuthTimeout = Duration(seconds: 10);
 
+  /// How long to wait for a `sender_cert` reply after asking for one.
+  static const Duration _kCertTimeout = Duration(seconds: 10);
+
+  /// Re-request a sender certificate this far before its `exp`, so a send is
+  /// never sealed with a cert that expires in-flight before the recipient
+  /// opens it.
+  static const int _kCertRefreshMarginMs = 60 * 60 * 1000; // 1h
+
   final Uri _relayUrl;
   final IdentityManager _identityManager;
   final RelayAuthManager _relayAuthManager;
@@ -85,6 +94,16 @@ class RelayService {
   int _reconnectAttempts = 0;
   bool _wiped = false;
   RelayConnectionState _state = RelayConnectionState.disconnected;
+
+  // Sealed Sender certificate, issued by the relay over the authed WS and
+  // cached in memory only (re-requested each cold start, consistent with the
+  // forensic-resistance model — nothing cert-related is persisted). The cert
+  // binds our authenticated userID to our Signal identity key for a bounded
+  // window; the sender staples it inside every sealed envelope.
+  Uint8List? _certBytes;
+  Uint8List? _certSig;
+  int? _certExpMs;
+  Completer<void>? _certCompleter;
 
   // PrekeyService is wired in AFTER construction via attachPrekeyService.
   // The two services have a mutual dependency — PrekeyService needs the
@@ -279,11 +298,91 @@ class RelayService {
           _incomingController.add(msg);
         }
         break;
+      case 'sender_cert':
+        _handleSenderCert(msg);
+        break;
       default:
         // Unknown frame type — forward-compatible behavior is to
         // ignore. A logging hook here would be a metadata leak.
         break;
     }
+  }
+
+  /// Caches a `sender_cert` reply. The relay marshals the cert and signature
+  /// as Go `[]byte`, which JSON-encode as base64 strings. The cert is itself
+  /// canonical JSON `{uid, ik, exp}`; we read `exp` so we can refresh before
+  /// it lapses. Always completes any pending [ensureSenderCert] waiter — even
+  /// on malformed input, so the waiter falls through to "no cert" rather than
+  /// hanging until timeout.
+  void _handleSenderCert(Map<String, dynamic> msg) {
+    try {
+      final certB64 = msg['cert'];
+      final sigB64 = msg['signature'];
+      if (certB64 is! String || sigB64 is! String) {
+        return;
+      }
+      final cert = base64Decode(certB64);
+      final sig = base64Decode(sigB64);
+      final certJson = jsonDecode(utf8.decode(cert));
+      if (certJson is! Map<String, dynamic> || certJson['exp'] is! num) {
+        return;
+      }
+      _certBytes = cert;
+      _certSig = sig;
+      _certExpMs = (certJson['exp'] as num).toInt();
+    } catch (_) {
+      // Leave the cache untouched on any parse failure; the waiter resolves
+      // to "no cert available" below.
+    } finally {
+      if (!(_certCompleter?.isCompleted ?? true)) {
+        _certCompleter!.complete();
+      }
+    }
+  }
+
+  /// Returns a currently-valid sender certificate (bytes + signature),
+  /// requesting a fresh one over the authed WS if the cache is empty or close
+  /// to expiry. Returns null if the relay is not connected or does not reply
+  /// in time — the caller MUST then queue/fail the send rather than fall back
+  /// to an unsealed path. [nowMs] is the caller's clock for the expiry check.
+  Future<({Uint8List cert, Uint8List sig})?> ensureSenderCert({
+    required int nowMs,
+  }) async {
+    final cert = _certBytes;
+    final sig = _certSig;
+    final exp = _certExpMs;
+    if (cert != null &&
+        sig != null &&
+        exp != null &&
+        nowMs < exp - _kCertRefreshMarginMs) {
+      return (cert: cert, sig: sig);
+    }
+
+    if (_state != RelayConnectionState.connected) {
+      return null;
+    }
+
+    // Coalesce concurrent requests: only emit one request frame while a reply
+    // is outstanding; additional callers await the same completer.
+    if (_certCompleter == null || _certCompleter!.isCompleted) {
+      _certCompleter = Completer<void>();
+      _channel?.sink.add(jsonEncode(<String, Object>{
+        'type': 'request_sender_cert',
+      }));
+    }
+
+    try {
+      await _certCompleter!.future.timeout(_kCertTimeout);
+    } catch (_) {
+      return null;
+    }
+
+    final newCert = _certBytes;
+    final newSig = _certSig;
+    if (newCert != null && newSig != null) {
+      return (cert: newCert, sig: newSig);
+    }
+    return null;
   }
 
   Future<void> _respondToChallenge(Map<String, dynamic> challenge) async {
@@ -498,6 +597,11 @@ class RelayService {
     } catch (_) {/* ignore */}
     _channel = null;
     _authCompleter = null;
+    // Drop the cached sender certificate with the rest of the session state.
+    _certBytes = null;
+    _certSig = null;
+    _certExpMs = null;
+    _certCompleter = null;
     _setState(RelayConnectionState.disconnected);
     if (!_incomingController.isClosed) {
       await _incomingController.close();

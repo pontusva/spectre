@@ -8,6 +8,7 @@ import 'package:uuid/uuid.dart';
 import '../core/crypto/identity_manager.dart';
 import '../core/crypto/prekey_manager.dart';
 import '../core/crypto/relay_auth_manager.dart';
+import '../core/crypto/sealed_sender.dart';
 import '../core/crypto/session_manager.dart';
 import '../core/models/conversation.dart';
 import '../core/models/message.dart';
@@ -101,6 +102,13 @@ class MessageService {
   // one. See receiveMessage().
   final PrekeyService _prekeyService;
 
+  // Sealed Sender. Null only in tests / the DEV-attribution composition;
+  // when present (and [kDevSenderAttribution] is false), outgoing messages are
+  // sealed with seal() and incoming ones are unwrapped with open() + the C2
+  // identity binding. When null and dev attribution is off, the receive path
+  // fails closed (drops sealed envelopes) rather than trusting a wire sender.
+  final SealedSender? _sealed;
+
   final Uuid _uuid;
   final StreamController<DecryptedMessage> _decryptedController =
       StreamController<DecryptedMessage>.broadcast();
@@ -131,6 +139,7 @@ class MessageService {
     required RelayService relayService,
     required RelayAuthManager relayAuthManager,
     required PrekeyService prekeyService,
+    SealedSender? sealedSender,
     Uuid? uuid,
   })  : _identity = identityManager,
         _prekeys = preKeyManager,
@@ -139,6 +148,7 @@ class MessageService {
         _relay = relayService,
         _relayAuth = relayAuthManager,
         _prekeyService = prekeyService,
+        _sealed = sealedSender,
         _uuid = uuid ?? const Uuid() {
     // Announce the sender-attribution mode once at startup. SPECTRE_DEV_
     // ATTRIBUTION is a compile-time const, so it only takes effect on a full
@@ -182,15 +192,11 @@ class MessageService {
     final conversationId = await _ensureConversation(recipientId);
     final now = DateTime.now().toUtc();
 
-    // What goes on the wire. With DEV attribution this wraps our user id in
-    // cleartext alongside the ciphertext; otherwise it is the raw ratchet
-    // ciphertext (and the recipient currently has no way to attribute it
-    // until Sealed Sender is wired). The local DB always stores the raw
-    // ciphertext, never the wrapper.
-    final wireCtB64 = kDevSenderAttribution
-        ? _devWrap(identity.userId, ciphertextB64)
-        : ciphertextB64;
-
+    // The local DB always stores the inner ratchet ciphertext, never the wire
+    // form. The wire form (sealed blob, or the DEV cleartext wrapper) is built
+    // at delivery time by [_deliver] so a send that can't be sealed yet — no
+    // session identity or no sender certificate — is queued and resealed on
+    // the next drain, never sent unsealed.
     final ciphertextBytes = Uint8List.fromList(utf8.encode(ciphertextB64));
     try {
       await _db.insertMessage(Message(
@@ -207,34 +213,67 @@ class MessageService {
       return MessageStatus.failed;
     }
 
-    if (_relay.currentState != RelayConnectionState.connected) {
-      _pending[messageId] = _PendingSend(
-        messageId: messageId,
-        recipientId: recipientId,
-        ciphertextB64: wireCtB64,
-        timestamp: now,
-      );
-      _log('queued pending send id=${_redactId(messageId)}');
-      return MessageStatus.pending;
-    }
-
     try {
-      await _relay.sendMessage(
-        recipientId: recipientId,
-        ciphertextB64: wireCtB64,
-        sealed: true,
-      );
+      await _deliver(recipientId, ciphertextB64);
       return MessageStatus.sent;
     } catch (e) {
       _pending[messageId] = _PendingSend(
         messageId: messageId,
         recipientId: recipientId,
-        ciphertextB64: wireCtB64,
+        ciphertextB64: ciphertextB64,
         timestamp: now,
       );
-      _log('send failed -> pending :: ${e.runtimeType}');
+      _log('send not delivered -> pending :: ${e.runtimeType}');
       return MessageStatus.pending;
     }
+  }
+
+  /// Builds the on-wire form for [innerCtB64] and hands it to the relay.
+  /// Throws on any failure (relay offline, no session identity, no sender
+  /// certificate, seal error) so the caller queues for retry. Critically, the
+  /// sealed path NEVER falls back to sending an unsealed envelope — failing
+  /// closed is the whole point of sealed sender.
+  Future<void> _deliver(String recipientId, String innerCtB64) async {
+    final String wireCtB64;
+    if (kDevSenderAttribution) {
+      final identity = await _identity.loadOrCreate();
+      wireCtB64 = _devWrap(identity.userId, innerCtB64);
+    } else {
+      wireCtB64 = await _sealForWire(recipientId, innerCtB64);
+    }
+    await _relay.sendMessage(
+      recipientId: recipientId,
+      ciphertextB64: wireCtB64,
+      sealed: true,
+    );
+  }
+
+  /// Produces the base64 sealed-sender blob for [innerCtB64]. Throws if any
+  /// prerequisite is missing so [_deliver] can queue rather than leak.
+  Future<String> _sealForWire(String recipientId, String innerCtB64) async {
+    final sealed = _sealed;
+    if (sealed == null) {
+      throw StateError('sealed sender not configured');
+    }
+    // Recipient identity key from the established session — no prekey-bundle
+    // refetch, so no one-time prekey is burned per message.
+    final recipientIdentityKey = await _sessions.remoteIdentityKey(recipientId);
+    if (recipientIdentityKey == null) {
+      throw StateError('no session identity for recipient yet');
+    }
+    final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final cert = await _relay.ensureSenderCert(nowMs: nowMs);
+    if (cert == null) {
+      throw StateError('sender certificate unavailable');
+    }
+    final blob = await sealed.seal(
+      recipientId: recipientId,
+      recipientIdentityKey: recipientIdentityKey,
+      certBytes: cert.cert,
+      certSignature: cert.sig,
+      innerCiphertextB64: innerCtB64,
+    );
+    return base64Encode(blob);
   }
 
   Future<void> receiveMessage(Map<String, dynamic> envelope) async {
@@ -253,10 +292,11 @@ class MessageService {
 
     // Resolve the sender. With DEV attribution we unwrap a cleartext
     // {from, ct} wrapper carried inside the ciphertext field (local
-    // two-device testing only — see [kDevSenderAttribution]). Otherwise we
-    // fall back to an envelope `sender_id`; note Sealed Sender (the real
-    // authenticated source) is not wired yet, so without the dev flag a
-    // sealed envelope has no sender and is dropped.
+    // two-device testing only — see [kDevSenderAttribution]). Otherwise the
+    // ciphertext field is a Sealed Sender blob: we open it with our identity
+    // key, which yields the authenticated sender id and the inner ratchet
+    // ciphertext. There is NO sender_id fallback — a frame we cannot open is
+    // dropped (fail closed).
     final String senderId;
     final String ciphertextB64;
     if (kDevSenderAttribution) {
@@ -268,13 +308,49 @@ class MessageService {
       senderId = unwrapped.$1;
       ciphertextB64 = unwrapped.$2;
     } else {
-      final senderIdRaw = envelope['sender_id'];
-      if (senderIdRaw is! String) {
-        _log('dropped envelope: no resolved sender (sealed sender not wired)');
+      final sealed = _sealed;
+      if (sealed == null) {
+        _log('dropped envelope: sealed sender not configured');
         return;
       }
-      senderId = senderIdRaw;
-      ciphertextB64 = rawCiphertext;
+      final Uint8List blob;
+      try {
+        blob = base64Decode(rawCiphertext);
+      } catch (_) {
+        _log('dropped envelope: sealed blob not base64');
+        return;
+      }
+      final identity = await _identity.loadOrCreate();
+      final OpenedSealed opened;
+      try {
+        opened = await sealed.open(
+          ownIdentityKeyPair: identity.identityKeyPair,
+          blob: blob,
+          recipientId: identity.userId,
+          // H2 (deferred): device clock + no replay cache. A trusted clock and
+          // a (eph_pub, nonce) replay cache are a follow-up before production.
+          nowMs: DateTime.now().toUtc().millisecondsSinceEpoch,
+        );
+      } catch (e) {
+        // Any malformed/forged/expired sealed envelope. Fail closed; log the
+        // runtime type only, never the blob bytes or cert fields.
+        _log('dropped sealed envelope :: ${e.runtimeType}');
+        return;
+      }
+      // C2: bind the certified sender identity to the identity key inside a
+      // first-contact PreKey message BEFORE any decrypt/session init, so a
+      // hostile relay cannot staple a valid cert onto someone else's message.
+      try {
+        SessionManager.assertFirstContactIdentity(
+          opened.innerCiphertextB64,
+          opened.senderIdentityKeyRaw,
+        );
+      } catch (e) {
+        _log('dropped sealed envelope: identity binding :: ${e.runtimeType}');
+        return;
+      }
+      senderId = opened.senderId;
+      ciphertextB64 = opened.innerCiphertextB64;
     }
 
     final ciphertextBytes = Uint8List.fromList(utf8.encode(ciphertextB64));
@@ -396,11 +472,9 @@ class MessageService {
       if (_relay.currentState != RelayConnectionState.connected) break;
       p.attempts++;
       try {
-        await _relay.sendMessage(
-          recipientId: p.recipientId,
-          ciphertextB64: p.ciphertextB64,
-          sealed: true,
-        );
+        // p.ciphertextB64 is the inner ratchet ciphertext; _deliver reseals it
+        // with a current certificate at drain time.
+        await _deliver(p.recipientId, p.ciphertextB64);
         _pending.remove(p.messageId);
         _log('drained pending id=${_redactId(p.messageId)}');
       } catch (e) {

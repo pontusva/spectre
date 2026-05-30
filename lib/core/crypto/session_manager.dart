@@ -242,4 +242,94 @@ class SessionManager {
   Future<void> wipeAllSessions() async {
     await _store.deleteAllSessions('');
   }
+
+  /// Returns the recipient's long-term Signal identity public key as it was
+  /// saved into the store when their session was established (libsignal's
+  /// SessionBuilder pins the remote identity during processPreKeyBundle).
+  ///
+  /// Used by the Sealed Sender send path, which encrypts the outer envelope
+  /// to this key. Reading it from the session store rather than re-fetching
+  /// the peer's prekey bundle means we do NOT consume a one-time prekey on
+  /// every send — only on the first-contact fetch that built the session.
+  ///
+  /// Returns null when no session exists yet (the in-memory identity store
+  /// throws on an unknown address); the caller should treat that as
+  /// "not ready" and queue the send rather than fall back to an insecure
+  /// path.
+  Future<ECPublicKey?> remoteIdentityKey(String recipientId) async {
+    try {
+      final identity = await _store.getIdentity(_address(recipientId));
+      return identity.publicKey;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Enforces the Sealed Sender C2 binding: the identity key embedded in a
+  /// first-contact [PreKeySignalMessage] MUST equal [expectedRawIk] (the raw
+  /// 32-byte identity key from the verified sender certificate). Without this
+  /// a hostile relay could staple a valid cert for one user onto another
+  /// user's PreKey message.
+  ///
+  /// Parsing a PreKeySignalMessage does NOT decrypt or advance the ratchet
+  /// and does NOT consume a one-time prekey, so this check is safe to run
+  /// BEFORE [decryptMessage]/[initializeSession]. It is a no-op for
+  /// non-first-contact (WHISPER_TYPE) messages, whose sender identity is
+  /// already established by the existing session.
+  ///
+  /// Throws [IdentityBindingException] on mismatch; the caller MUST drop the
+  /// message (never fall through to decrypt).
+  ///
+  /// Static because it depends only on the message bytes and the expected key
+  /// — no session/store state — which also keeps it directly unit-testable.
+  static void assertFirstContactIdentity(
+    String ciphertextB64,
+    Uint8List expectedRawIk,
+  ) {
+    final envelope = jsonDecode(utf8.decode(base64Decode(ciphertextB64)))
+        as Map<String, dynamic>;
+    final type = envelope['type'] as int;
+    if (type != CiphertextMessage.PREKEY_TYPE) {
+      return;
+    }
+    final body = base64Decode(envelope['body'] as String);
+    // Parse-only: extracts the protobuf fields (incl. identityKey) without
+    // touching the ratchet or our prekey store.
+    final preKeyMessage = PreKeySignalMessage(body);
+    // IdentityKey.serialize() returns the 33-byte djb form (0x05 tag + 32-byte
+    // coordinate); strip the tag to match the certificate's raw 32 bytes.
+    final serialized = preKeyMessage.getIdentityKey().publicKey.serialize();
+    final messageRawIk =
+        serialized.length == 33 ? serialized.sublist(1) : serialized;
+    if (!_constantTimeEquals(messageRawIk, expectedRawIk)) {
+      throw const IdentityBindingException(
+        'PreKey identity does not match sender certificate',
+      );
+    }
+  }
+
+  /// Length-independent constant-time byte comparison. Identity keys are not
+  /// secret, but routing comparison through a non-short-circuiting check keeps
+  /// the verification path free of an early-exit timing signal as a matter of
+  /// hygiene.
+  static bool _constantTimeEquals(Uint8List a, Uint8List b) {
+    var diff = a.length ^ b.length;
+    final n = a.length < b.length ? a.length : b.length;
+    for (var i = 0; i < n; i++) {
+      diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
+  }
+}
+
+/// Thrown by [SessionManager.assertFirstContactIdentity] when a first-contact
+/// PreKey message's identity key does not match the sender certificate. A
+/// distinct type so the receive path can drop the message and log only the
+/// runtime type, never the mismatching bytes.
+class IdentityBindingException implements Exception {
+  final String message;
+  const IdentityBindingException(this.message);
+
+  @override
+  String toString() => 'IdentityBindingException: $message';
 }

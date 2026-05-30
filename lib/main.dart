@@ -8,11 +8,13 @@ import 'package:go_router/go_router.dart';
 import 'core/crypto/identity_manager.dart';
 import 'core/crypto/prekey_manager.dart';
 import 'core/crypto/relay_auth_manager.dart';
+import 'core/crypto/sealed_sender.dart';
 import 'core/crypto/session_manager.dart';
 import 'core/storage/secure_database.dart';
 import 'services/message_service.dart';
 import 'services/network/prekey_service.dart';
 import 'services/network/relay_service.dart';
+import 'services/network/sealed_ca_service.dart';
 import 'ui/theme/app_theme.dart';
 import 'ui/theme/router.dart';
 
@@ -161,6 +163,23 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
       );
       relayService.attachPrekeyService(prekeyService);
 
+      // Sealed Sender: fetch + TOFU-pin the relay's CA key, then build a
+      // SealedSender bound to it. Skipped for DEV-attribution builds (which
+      // use the cleartext wrapper). Boot-resilient: if the CA key can't be
+      // obtained (relay unreachable and none pinned) we proceed with a null
+      // SealedSender — sealed messaging stays unavailable until a restart with
+      // the relay reachable, rather than blocking app bring-up. The HTTP fetch
+      // is internally bounded by a timeout.
+      SealedSender? sealedSender;
+      if (!kDevSenderAttribution) {
+        try {
+          sealedSender =
+              await SealedCaService(relayUrl: relayUri).sealedSender();
+        } catch (_) {
+          sealedSender = null;
+        }
+      }
+
       final messageService = MessageService(
         identityManager: identityManager,
         preKeyManager: preKeyManager,
@@ -169,6 +188,7 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
         relayService: relayService,
         relayAuthManager: relayAuthManager,
         prekeyService: prekeyService,
+        sealedSender: sealedSender,
       );
 
       // Kick off relay connection in the background. UI is functional
