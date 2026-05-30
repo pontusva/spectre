@@ -24,6 +24,13 @@ dependencies:
 
   # Additional crypto
   pointycastle: ^3.7.3
+  # HKDF-SHA256 + ChaCha20-Poly1305 for the Sealed Sender outer envelope
+  # (lib/core/crypto/sealed_sender.dart). Used ONLY for the symmetric seal:
+  # the X25519 ECDH uses libsignal's Curve so it interoperates with the
+  # Curve25519 identity keys, and cert verification stays on ed25519_edwards
+  # for Go-relay wire compatibility (see the note below on why its Ed25519
+  # specifically is NOT used).
+  cryptography: ^2.7.0
   # Pure-Dart RFC 8032 Ed25519. Used by RelayAuthManager so signatures
   # produced here are byte-identical to Go's ed25519.Sign / ed25519.Verify
   # on the relay. package:cryptography's Ed25519 was rejected because

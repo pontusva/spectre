@@ -508,6 +508,163 @@ Requirements:
 | Atomic tempfile+rename for queue | Crash-safe — never torn file on disk |
 | Key file separate from queue file | Backup queue without exposing key |
 | data/ removed from git history | Keys accidentally committed — scrubbed with filter-branch |
+| Rejected OpenEnvelope-on-first-contact | sender_id on the wire leaks the social-graph edge at first contact — the exact metadata the threat model protects; session init does not require it |
+| Sealed sender built in-house | libsignal_protocol_dart 0.4.1 has no SealedSessionCipher; construction layered on Curve ECDH + cryptography HKDF/AEAD + ed25519 cert (see Sealed Sender design section) |
+| Sender cert ik bound to registered bundle | Relay only knows the relay-auth key at auth time, not the Signal identity key; binding cert.ik to the authed user's published bundle keeps the userID the sole authority |
+
+---
+
+## Sealed Sender — Design (Session 3, in progress)
+
+### Why this section exists
+The codebase talks about Sealed Sender as if `SealedSessionCipher` will
+wrap outgoing ciphertext at the transport layer (see session_manager.dart
+header + the flagged item "Sealed Sender transport enforcement"). **That
+primitive does not exist in `libsignal_protocol_dart` 0.4.1** — there is
+no `SealedSessionCipher`, `SenderCertificate`, or `ServerCertificate` in
+the package. So sealed sender has to be built on the primitives the
+package *does* expose (`Curve` X25519 ECDH) plus `package:cryptography`
+(HKDF, ChaCha20-Poly1305) and `package:ed25519_edwards` (cert verify,
+matching the Go relay's `ed25519.Verify`).
+
+### Root-cause bug being fixed
+The **send** path is already metadata-safe (`sendMessage(sealed: true)`
+omits sender_id on the wire). The **receive** path is broken: it *requires*
+`envelope['sender_id']` and drops anything without it — so a sealed chat
+message can never be received. The tempting "fix" (put sender_id back on
+the wire as an OpenEnvelope for first contact) was REJECTED: it leaks the
+exact (sender→recipient) social-graph edge to the relay at first contact,
+which is precisely the metadata Principle #3 and the journalist/source
+threat model exist to protect. First contact is the worst place to leak.
+Session establishment (PreKeySignalMessage) does NOT require an open
+envelope — the two layers are orthogonal.
+
+### Upgrade evaluated and rejected as a shortcut
+Checked whether bumping `libsignal_protocol_dart` would supply the missing
+primitive: pulled and inspected **0.8.0** (latest). It has NO sealed sender
+either — no `Sealed*`, `SenderCertificate`, `ServerCertificate`, or
+`unidentified` anywhere in its `lib/`. The whole 0.x line of this Dart port
+lacks it. 0.8.0 is also a breaking migration (snake_case file renames,
+pointycastle 4.0, protobuf 6.0, ed25519_edwards 0.3.1). Conclusion: the
+in-house construction below is required regardless of version; upgrading is
+a separate maintenance decision with no sealed-sender payoff.
+
+### Construction (sealed-sender-v1)
+**Server CA.** Relay holds a long-term Ed25519 "sealed-sender CA" key
+(`SPECTRE_SEALED_CA_PATH`, generated if absent). `GET /sealed-ca` returns
+its public key (public by definition). Clients pin on first fetch (TOFU)
+and cache.
+
+**Sender certificate.** Over the authed WS the client sends
+`{type:"request_sender_cert"}`. Relay replies
+`{type:"sender_cert", cert:<b64 canonical-json>, signature:<b64>}` where
+`cert = {uid, ik, exp}`:
+  - `uid` = the AUTHENTICATED userID (never client-supplied — same
+    authority rule as prekey bundles).
+  - `ik` = the userID's Signal identity public key, taken from its
+    REGISTERED prekey bundle on the relay (authoritative). Reject issuance
+    if no bundle registered.
+  - `exp` = now + 24h. `signature` = Ed25519(CA_priv, canonical(cert)).
+
+**Outer envelope (sender builds, recipient identity key `IK_R` known from
+R's already-fetched prekey bundle):**
+  1. `E = Curve.generateKeyPair()` (ephemeral X25519).
+  2. `dh = Curve.calculateAgreement(IK_R_pub, E.priv)`.
+  3. `key = HKDF-SHA256(ikm=dh, salt=e_pub_raw||IK_R_raw,
+     info="spectre-sealed-sender-v1", L=32)` — binds ephemeral + recipient
+     identity into the KDF (anti key-reuse / identity-misbinding).
+  4. `inner = canonical({cert, cert_sig, ct})`, `ct` = existing
+     `encryptMessage` output (type+body envelope).
+  5. `aead = ChaCha20-Poly1305(key, nonce(12B random), aad=recipient_id,
+     inner)`.
+  6. `blob = e_pub_raw(32) || nonce(12) || aead_ct||tag`.
+  7. Wire `SealedEnvelope = {recipient_id, ciphertext:blob,
+     timestamp_ms, id:sha256hex(blob)}`.
+
+**Receive:** split blob → ECDH with own identity priv → HKDF → AEAD-decrypt
+(aad = own id; failure = drop, fail closed — this is the auth gate) →
+parse inner → verify `cert_sig` against pinned CA pubkey + check `exp` →
+extract authenticated `sender_id = cert.uid`. For a PreKey (type 3) inner
+message, enforce `PreKeySignalMessage.getIdentityKey() == cert.ik` BEFORE
+processing (binds the certified identity to the actual ratchet message, so
+a hostile relay can't pair a valid cert with someone else's ciphertext).
+Then run the existing decrypt flow with address = `sender_id`.
+
+### Wire-format reconciliation (pre-existing bug, fix alongside)
+Dart currently emits `{type, recipient_id, ciphertext:<string>, sealed,
+timestamp}`; the Go `SealedEnvelope` wants `{recipient_id,
+ciphertext:<[]byte b64>, timestamp_ms, id}`. Align Dart to the Go struct;
+drop `type`/`sealed` from the sealed wire form (relay routes by shape).
+
+### Residual leak (honest scope)
+Uploading even a sealed blob over the AUTHENTICATED WS lets the relay
+correlate sender at the TCP/session layer (already documented in
+relay_service.dart). True fix = separate unauthenticated upload channel.
+The cert design does NOT require an authenticated upload, so an anon
+channel drops in later without protocol changes. Documented, not yet built.
+
+### Review findings (Session 3 — author + independent agent pass)
+A first adversarial review (self + independent reviewer) was done on the
+core before wiring. Headline: the construction is a sound libsodium-style
+sealed box for metadata hiding, but **the certificate is NOT sender
+authentication against the relay**, because the untrusted relay IS the CA.
+
+Findings, by severity:
+- **C1 (design honesty) — FIXED in docs.** Relay-as-CA can forge attribution
+  and MITM first contact (mints cert{uid:victim, ik:attacker} and satisfies
+  the cert.ik==PreKey-identity binding itself). The ONLY defense is
+  out-of-band fingerprint verification (Spectre already has it). Corrected
+  the overstated comments in `sealed_sender.dart` and `sealed_ca.go`; the
+  cert is metadata-hiding + honest-relay integrity, never auth-vs-relay.
+  `senderId` is a CLAIM until the identity key is fingerprint-verified.
+- **C2 (MUST build in integration) — OPEN.** The `cert.ik ==
+  PreKeySignalMessage.getIdentityKey()` binding has no caller yet (open()
+  is only exercised by tests). The receive-path wiring MUST implement it and
+  test the mismatch-rejection before this ships.
+- **H1 (MUST fix) — OPEN.** Cert is a 24h bearer token not bound to the
+  envelope; combined with C2 a leaked/observed cert is re-stapleable.
+  Bind it: include a digest of (eph_pub || recipient_id || inner-ct) in the
+  AEAD-protected inner structure and verify on open; and/or shorten TTL.
+- **H2 (MUST fix) — OPEN.** Expiry trusts a caller-supplied clock and there
+  is no replay cache; a relay can redeliver a sealed PreKey blob to force
+  repeated session resets / prekey consumption. Use a trusted clock, reject
+  skew, add a short replay cache keyed on (eph_pub, nonce).
+- **M1 (fail-closed contract) — FIXED.** ECDH / point-decode in open() and
+  seal() now convert ArgumentError/InvalidKeyException to
+  SealedSenderException (added a malformed-blob test).
+- **M2/M3/L1/L2/L3 — DOCUMENTED.** Parse only over verified bytes (never
+  re-canonicalize); recipient_id bound as AAD only (ok under 1:1 id↔key);
+  CA key is HIGH-sensitivity (HSM + rotation-with-overlap, not "same as AES
+  keys"); ed25519 sigs are malleable so never use cert_sig as a dedup key;
+  never propagate SealedSenderException.reason outward (decryption oracle).
+
+Second pass (3 parallel independent agents — sender-auth / primitives /
+code-interop) — full consolidated table in SEALED_SENDER_REVIEW.md §5b:
+- Primitive layer judged SOUND as written (no exploitable break).
+- FIXED in core: M-NEW-2 (cert base64 fail-closed), M-NEW-4 (accept num exp
+  for Dart-web), L-NEW-1 (double-unmarshal), H-NEW-1 (added Go→Dart Ed25519
+  golden vector + more fail-closed tests; now 11 Dart + 2 Go tests green).
+- NEW-HIGH-1 (important, OPEN): out-of-band verification — the WHOLE C1
+  defense — is NOT enforced. isVerified is handle-keyed, never consulted on
+  decrypt/display, not pinned to identity-key bytes; recipientPublicKey is ''.
+  Must become a real key-pinned gate or C1's mitigation is fiction.
+- H3/H4 (reviewer decision, OPEN): move pubkeys into HKDF IKM (match
+  crypto_box_seal); add in-AEAD transcript commitment (also fixes H1).
+  Deliberately NOT applied unilaterally — these are construction changes.
+
+NOTE: this internal+agent review reduces but does NOT replace an EXTERNAL
+cryptographer review. C2/H1/H2/NEW-HIGH-1 are blocking for production.
+
+### Crypto-review checklist (MUST pass before production — do not ship unreviewed)
+- [x] HKDF context binding (ephemeral + recipient identity in salt/info)
+- [x] AEAD aad = recipient_id; decrypt failure is the auth gate, fail closed (M1 fixed: ECDH/decode also fail closed)
+- [x] cert signature + expiry verified before trusting sender_id (sig over exact bytes, then parse)
+- [ ] PreKey inner identityKey == cert.ik binding enforced  <-- C2: NOT wired yet, blocking
+- [x] ephemeral key from CSPRNG (Curve.generateKeyPair), unique key per message; nonce random
+- [ ] failure paths silent-drop + log e.runtimeType only (no envelope bytes)  <-- enforce in receive wiring; don't leak SealedSenderException.reason (L3)
+- [~] independent review — internal author+agent pass DONE (see findings); EXTERNAL cryptographer review still required
+- [ ] cert bound to envelope (H1) + replay cache & trusted clock (H2)  <-- blocking
+- [ ] cross-language test vector: Go-signed cert verified by Dart ed25519_edwards
 
 ---
 
