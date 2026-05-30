@@ -625,10 +625,15 @@ Findings, by severity:
   the overstated comments in `sealed_sender.dart` and `sealed_ca.go`; the
   cert is metadata-hiding + honest-relay integrity, never auth-vs-relay.
   `senderId` is a CLAIM until the identity key is fingerprint-verified.
-- **C2 (MUST build in integration) — OPEN.** The `cert.ik ==
-  PreKeySignalMessage.getIdentityKey()` binding has no caller yet (open()
-  is only exercised by tests). The receive-path wiring MUST implement it and
-  test the mismatch-rejection before this ships.
+- **C2 (MUST build in integration) — WIRED (Session 3).** The `cert.ik ==
+  PreKeySignalMessage.getIdentityKey()` binding is now enforced:
+  `SessionManager.assertFirstContactIdentity` parses the PreKey message
+  (no ratchet advance / no OTPK burn — libsignal 0.4.1's `PreKeySignalMessage`
+  exposes `getIdentityKey()`), strips the 0x05 tag, constant-time compares to
+  the cert's raw ik, and throws `IdentityBindingException` on mismatch.
+  `MessageService.receiveMessage` calls it after `open()` and BEFORE
+  decrypt/session-init. Tested in `test/c2_binding_test.dart`
+  (match / mismatch / WHISPER no-op against a real X3DH PreKey message).
 - **H1 (MUST fix) — OPEN.** Cert is a 24h bearer token not bound to the
   envelope; combined with C2 a leaked/observed cert is re-stapleable.
   Bind it: include a digest of (eph_pub || recipient_id || inner-ct) in the
@@ -663,13 +668,46 @@ code-interop) — full consolidated table in SEALED_SENDER_REVIEW.md §5b:
 NOTE: this internal+agent review reduces but does NOT replace an EXTERNAL
 cryptographer review. C2/H1/H2/NEW-HIGH-1 are blocking for production.
 
+### Wiring landed (Session 3) — Sealed Sender connected end-to-end (client)
+The previously-dead `SealedSender` core is now wired into the message path; the
+relay no longer needs the DEV cleartext wrapper to attribute messages. Branch
+`feat/sealed-sender-wiring-c2` in the spectre repo.
+
+- **CA pinning (TOFU)** — new `lib/services/network/sealed_ca_service.dart`:
+  fetches `GET /sealed-ca`, pins `public_key` under `spectre.sealed_ca_pub`,
+  **fails closed on key change**, tolerant of fetch failure once pinned, then
+  builds the `SealedSender`.
+- **Sender certificate** — `relay_service.dart`: `request_sender_cert` send +
+  `sender_cert` inbound case; in-memory cert cache (re-requested each cold
+  start) with a 1h refresh margin and request coalescing.
+- **Send** — `message_service.dart`: routes through fail-closed
+  `_deliver`/`_sealForWire` — seals with the recipient IK (read from the
+  established session store via `SessionManager.remoteIdentityKey`, so no
+  per-message bundle refetch / OTPK burn) + the cached cert; if IK or cert
+  isn't ready, the send is QUEUED, never sent unsealed.
+- **Receive** — `message_service.dart`: replaced the plaintext-`sender_id`
+  branch with `open()` → C2 (above) → existing decrypt flow. No `sender_id`
+  fallback; an unopenable frame is dropped (fail closed).
+- **Wiring** — `main.dart` constructs/injects `SealedSender` (skipped for
+  `kDevSenderAttribution` builds; boot-resilient if the CA key is unreachable).
+- **Dev wrapper** — `kDevSenderAttribution` + `_devWrap`/`_devUnwrap` left in
+  place (off by default) as the known-good fallback until e2e-verified;
+  removal is a later cleanup.
+- **Manual e2e**: see `SEALED_SENDER_TEST.md`. Relay dev launcher:
+  `spectre-relay/run-dev.sh`.
+
+Still OPEN and blocking for production: H1 (in-AEAD transcript commitment),
+H2 (trusted clock + replay cache — receive currently uses the device clock),
+NEW-HIGH-1 (pin `isVerified` to identity-key bytes; until then `senderId` is a
+CLAIM), and external cryptographer review.
+
 ### Crypto-review checklist (MUST pass before production — do not ship unreviewed)
 - [x] HKDF context binding (ephemeral + recipient identity in salt/info)
 - [x] AEAD aad = recipient_id; decrypt failure is the auth gate, fail closed (M1 fixed: ECDH/decode also fail closed)
 - [x] cert signature + expiry verified before trusting sender_id (sig over exact bytes, then parse)
-- [ ] PreKey inner identityKey == cert.ik binding enforced  <-- C2: NOT wired yet, blocking
+- [x] PreKey inner identityKey == cert.ik binding enforced  <-- C2 WIRED (Session 3): SessionManager.assertFirstContactIdentity, called in receiveMessage before decrypt; tested
 - [x] ephemeral key from CSPRNG (Curve.generateKeyPair), unique key per message; nonce random
-- [ ] failure paths silent-drop + log e.runtimeType only (no envelope bytes)  <-- enforce in receive wiring; don't leak SealedSenderException.reason (L3)
+- [x] failure paths silent-drop + log e.runtimeType only (no envelope bytes)  <-- receive wiring drops on open()/C2 failure logging e.runtimeType only; SealedSenderException.reason never surfaced (L3)
 - [~] independent review — internal author+agent pass DONE (see findings); EXTERNAL cryptographer review still required
 - [ ] cert bound to envelope (H1) + replay cache & trusted clock (H2)  <-- blocking
 - [ ] cross-language test vector: Go-signed cert verified by Dart ed25519_edwards
@@ -698,5 +736,5 @@ cryptographer review. C2/H1/H2/NEW-HIGH-1 are blocking for production.
 
 ---
 
-Last updated: Session 3 (2026-05-30) — signed_prekey_id round-trip fixed; two-device send+receive working via DEV attribution wrapper
-Next session: wire real Sealed Sender into send/receive (retire DEV wrapper), enforce C2 cert↔PreKey-identity binding, then address H1/H2/NEW-HIGH-1 before any production use
+Last updated: Session 3 (2026-05-30) — signed_prekey_id round-trip fixed; Sealed Sender wired into send/receive with C2 enforced (branch feat/sealed-sender-wiring-c2; unit-tested, e2e pending — see SEALED_SENDER_TEST.md)
+Next session: run the two-device e2e (SEALED_SENDER_TEST.md), then close H1/H2/NEW-HIGH-1 and remove the DEV wrapper before any production use; external cryptographer review still required
