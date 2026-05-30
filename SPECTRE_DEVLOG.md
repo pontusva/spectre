@@ -357,6 +357,7 @@ SPECTRE_DEV=true \
 SPECTRE_LISTEN_ADDR=":8080" \
 SPECTRE_QUEUE_PATH="./data/offline_queue.enc" \
 SPECTRE_PREKEY_PATH="./data/prekeys.enc" \
+SPECTRE_SEALED_CA_PATH="./data/sealed_ca.key" \
 go run .
 ```
 

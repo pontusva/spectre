@@ -15,6 +15,22 @@ import '../core/storage/secure_database.dart';
 import 'network/prekey_service.dart';
 import 'network/relay_service.dart';
 
+/// DEV-ONLY sender attribution shortcut for local two-device testing.
+///
+/// When true, the sender's user id is wrapped (in CLEARTEXT) alongside the
+/// ratchet ciphertext on the wire so the recipient can attribute and route a
+/// message WITHOUT Sealed Sender being wired up yet. This intentionally LEAKS
+/// the sender id to anyone who can parse the ciphertext blob — including the
+/// relay — so it MUST NEVER be enabled for the production/activist build. The
+/// secure replacement is Sealed Sender (see SEALED_SENDER_REVIEW.md); when
+/// that lands, this flag and its [_devWrap]/[_devUnwrap] helpers go away.
+///
+/// Off by default — a production build has no sender attribution path until
+/// Sealed Sender is wired. Enable for local testing with:
+///   flutter run --dart-define=SPECTRE_DEV_ATTRIBUTION=true
+const bool kDevSenderAttribution =
+    bool.fromEnvironment('SPECTRE_DEV_ATTRIBUTION', defaultValue: false);
+
 /// Coarse outcome of a [MessageService.sendMessage] call.
 enum MessageStatus {
   /// Encrypted, persisted, and acknowledged by the relay.
@@ -156,6 +172,15 @@ class MessageService {
     final conversationId = await _ensureConversation(recipientId);
     final now = DateTime.now().toUtc();
 
+    // What goes on the wire. With DEV attribution this wraps our user id in
+    // cleartext alongside the ciphertext; otherwise it is the raw ratchet
+    // ciphertext (and the recipient currently has no way to attribute it
+    // until Sealed Sender is wired). The local DB always stores the raw
+    // ciphertext, never the wrapper.
+    final wireCtB64 = kDevSenderAttribution
+        ? _devWrap(identity.userId, ciphertextB64)
+        : ciphertextB64;
+
     final ciphertextBytes = Uint8List.fromList(utf8.encode(ciphertextB64));
     try {
       await _db.insertMessage(Message(
@@ -176,7 +201,7 @@ class MessageService {
       _pending[messageId] = _PendingSend(
         messageId: messageId,
         recipientId: recipientId,
-        ciphertextB64: ciphertextB64,
+        ciphertextB64: wireCtB64,
         timestamp: now,
       );
       _log('queued pending send id=${_redactId(messageId)}');
@@ -186,7 +211,7 @@ class MessageService {
     try {
       await _relay.sendMessage(
         recipientId: recipientId,
-        ciphertextB64: ciphertextB64,
+        ciphertextB64: wireCtB64,
         sealed: true,
       );
       return MessageStatus.sent;
@@ -194,7 +219,7 @@ class MessageService {
       _pending[messageId] = _PendingSend(
         messageId: messageId,
         recipientId: recipientId,
-        ciphertextB64: ciphertextB64,
+        ciphertextB64: wireCtB64,
         timestamp: now,
       );
       _log('send failed -> pending :: ${e.runtimeType}');
@@ -205,20 +230,42 @@ class MessageService {
   Future<void> receiveMessage(Map<String, dynamic> envelope) async {
     if (_wiped) return;
 
-    final ciphertextB64 = envelope['ciphertext'];
-    final sealed = envelope['sealed'] == true;
-    final senderIdRaw = envelope['sender_id'];
-    final timestampMs = envelope['timestamp'];
+    final rawCiphertext = envelope['ciphertext'];
+    // The relay delivers the Go-side field `timestamp_ms`; tolerate a legacy
+    // `timestamp` too. (The old code read `timestamp`, which the relay never
+    // sends — so every inbound message was dropped as malformed.)
+    final timestampMs = envelope['timestamp_ms'] ?? envelope['timestamp'];
 
-    if (ciphertextB64 is! String || timestampMs is! int) {
+    if (rawCiphertext is! String || timestampMs is! int) {
       _log('dropped envelope: malformed');
       return;
     }
-    if (senderIdRaw is! String) {
-      _log('dropped envelope: no resolved sender (sealed=$sealed)');
-      return;
+
+    // Resolve the sender. With DEV attribution we unwrap a cleartext
+    // {from, ct} wrapper carried inside the ciphertext field (local
+    // two-device testing only — see [kDevSenderAttribution]). Otherwise we
+    // fall back to an envelope `sender_id`; note Sealed Sender (the real
+    // authenticated source) is not wired yet, so without the dev flag a
+    // sealed envelope has no sender and is dropped.
+    final String senderId;
+    final String ciphertextB64;
+    if (kDevSenderAttribution) {
+      final unwrapped = _devUnwrap(rawCiphertext);
+      if (unwrapped == null) {
+        _log('dropped envelope: dev attribution wrapper parse failed');
+        return;
+      }
+      senderId = unwrapped.$1;
+      ciphertextB64 = unwrapped.$2;
+    } else {
+      final senderIdRaw = envelope['sender_id'];
+      if (senderIdRaw is! String) {
+        _log('dropped envelope: no resolved sender (sealed sender not wired)');
+        return;
+      }
+      senderId = senderIdRaw;
+      ciphertextB64 = rawCiphertext;
     }
-    final senderId = senderIdRaw;
 
     final ciphertextBytes = Uint8List.fromList(utf8.encode(ciphertextB64));
     final messageId = _contentHashId(ciphertextBytes);
@@ -299,8 +346,37 @@ class MessageService {
   }
 
   Future<void> _onRelayFrame(Map<String, dynamic> envelope) async {
-    if (envelope['type'] != 'message') return;
+    // The relay delivers SealedEnvelope/OpenEnvelope frames by SHAPE, with no
+    // `type` field — so gating on `type == 'message'` (as the old code did)
+    // dropped every delivered message. Control frames (auth/cert) are handled
+    // inside RelayService and never reach this stream, so any frame here that
+    // carries a ciphertext is a delivery.
+    if (envelope['ciphertext'] is! String) return;
     await receiveMessage(envelope);
+  }
+
+  /// DEV-ONLY ([kDevSenderAttribution]): pack the sender id in cleartext
+  /// alongside the ratchet ciphertext. base64(json) so it survives the
+  /// relay's opaque `ciphertext` field untouched. NOT a security boundary —
+  /// the relay can read `from`. Removed when Sealed Sender lands.
+  String _devWrap(String senderId, String ciphertextB64) {
+    return base64Encode(utf8.encode(
+      jsonEncode(<String, String>{'from': senderId, 'ct': ciphertextB64}),
+    ));
+  }
+
+  /// Inverse of [_devWrap]. Returns (senderId, ciphertextB64) or null if the
+  /// blob is not a dev wrapper (fail closed — caller drops the envelope).
+  (String, String)? _devUnwrap(String wire) {
+    try {
+      final decoded = jsonDecode(utf8.decode(base64Decode(wire)));
+      if (decoded is Map<String, dynamic>) {
+        final from = decoded['from'];
+        final ct = decoded['ct'];
+        if (from is String && ct is String) return (from, ct);
+      }
+    } catch (_) {/* not a dev wrapper */}
+    return null;
   }
 
   Future<void> _drainPending() async {

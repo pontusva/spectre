@@ -367,7 +367,10 @@ class RelayService {
       'recipient_id': recipientId,
       'ciphertext': ciphertextB64,
       'sealed': sealed,
-      'timestamp': DateTime.now().toUtc().millisecondsSinceEpoch,
+      // Field name matches the relay's SealedEnvelope/OpenEnvelope
+      // `timestamp_ms` json tag. Sending `timestamp` (the old name) left the
+      // relay's TimestampMS at 0, so delivered messages showed as epoch 1970.
+      'timestamp_ms': DateTime.now().toUtc().millisecondsSinceEpoch,
     };
 
     if (!sealed) {
