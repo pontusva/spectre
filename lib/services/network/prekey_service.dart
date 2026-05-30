@@ -171,8 +171,20 @@ class PrekeyService {
         signedPreKeySigB64 is! String) {
       throw const PrekeyFetchException('missing required field');
     }
-    final signedPreKeyId =
-        (json['signed_prekey_id'] is int) ? json['signed_prekey_id'] as int : 0;
+    // The signed prekey is mandatory and its id MUST survive the round trip
+    // — the sender embeds it in the PreKeySignalMessage and the receiver
+    // looks up its private half by that exact id. Tolerate a numeric string
+    // (a common JSON int/string mismatch across a Go relay) but FAIL LOUD on
+    // a genuinely absent/unparseable id rather than silently defaulting to 0:
+    // signed prekey ids start at 1 here, so 0 can only mean "the relay did
+    // not return the id", which builds a session doomed to throw
+    // InvalidKeyIdException("No such signedprekeyrecord! 0") on the receiver.
+    final signedPreKeyId = _parseId(json['signed_prekey_id']);
+    if (signedPreKeyId == null || signedPreKeyId == 0) {
+      throw const PrekeyFetchException(
+        'bundle missing signed_prekey_id (relay did not echo it)',
+      );
+    }
 
     // Restore the djb type tag (0x05) that the relay strips for
     // wire-compatibility with the Go side. libsignal's Curve.decodePoint
@@ -193,10 +205,10 @@ class PrekeyService {
     ECPublicKey? otpkPub;
     final otpk = json['one_time_prekey'];
     if (otpk is Map<String, dynamic>) {
-      final idRaw = otpk['id'];
+      final idParsed = _parseId(otpk['id']);
       final keyRaw = otpk['key'];
-      if (idRaw is int && keyRaw is String) {
-        otpkId = idRaw;
+      if (idParsed != null && keyRaw is String) {
+        otpkId = idParsed;
         otpkPub = Curve.decodePoint(
           _prependDjbTypeTag(base64Decode(keyRaw)),
           0,
@@ -223,6 +235,14 @@ class PrekeyService {
       signedPreKeySig,
       identityKey,
     );
+  }
+
+  // Parse a prekey id that may arrive as a JSON number or a numeric string.
+  // Returns null when the value is absent or not a non-negative integer.
+  static int? _parseId(Object? raw) {
+    if (raw is int) return raw;
+    if (raw is String) return int.tryParse(raw);
+    return null;
   }
 
   // libsignal serializes ECPublicKeys with a 1-byte type prefix

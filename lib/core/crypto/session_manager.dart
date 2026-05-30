@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 
 import 'identity_manager.dart';
+import 'prekey_manager.dart';
 
 /// Manages Signal Protocol sessions for outgoing and incoming messages.
 ///
@@ -67,12 +68,49 @@ class SessionManager {
   /// Construct once at startup and share — concurrent use across isolates
   /// is NOT supported because [InMemorySignalProtocolStore] is not
   /// thread-safe.
-  static Future<SessionManager> create(IdentityManager identityManager) async {
+  ///
+  /// The store is SEEDED with our own prekey private halves from
+  /// [preKeyManager]. This is essential, not optional: [PreKeyManager] owns
+  /// the persistent prekeys and uploads the matching PUBLIC bundle to the
+  /// relay, but the in-memory protocol store is what
+  /// [SessionCipher.decrypt] consults when an inbound PreKeySignalMessage
+  /// completes X3DH. Without this seeding the store contains only the
+  /// identity key, so the lookup of the signed/one-time prekey id embedded
+  /// in the message finds nothing and decryption throws
+  /// InvalidKeyIdException ("No such signedprekeyrecord"). [loadOrCreate]
+  /// on [preKeyManager] MUST have run before this.
+  ///
+  /// NOTE (forward-secrecy gap): when decrypt consumes a one-time prekey it
+  /// removes it from THIS in-memory copy only; PreKeyManager's persistent
+  /// record is not deleted here, so the private half survives on disk until
+  /// the next [PreKeyManager.consumePreKey]/wipe. Persisting consumption
+  /// across the two stores is a follow-up — see the in-memory-store note on
+  /// [_store].
+  static Future<SessionManager> create(
+    IdentityManager identityManager,
+    PreKeyManager preKeyManager,
+  ) async {
     final identity = await identityManager.loadOrCreate();
     final store = InMemorySignalProtocolStore(
       identity.identityKeyPair,
       identity.registrationId,
     );
+
+    // Signed prekey (current, plus previous during the rotation grace
+    // window so an in-flight init signed against the old key still works).
+    final signed = await preKeyManager.getCurrentSignedPreKey();
+    store.storeSignedPreKey(signed.id, signed);
+    final prevSigned = await preKeyManager.getPreviousSignedPreKey();
+    if (prevSigned != null) {
+      store.storeSignedPreKey(prevSigned.id, prevSigned);
+    }
+
+    // Every available one-time prekey, keyed by its id so the id carried in
+    // an inbound PreKeySignalMessage resolves to the matching private half.
+    for (final preKey in await preKeyManager.getAllPreKeys()) {
+      store.storePreKey(preKey.id, preKey);
+    }
+
     return SessionManager._(store);
   }
 

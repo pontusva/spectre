@@ -117,7 +117,8 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
       final relayAuthManager = RelayAuthManager();
       await relayAuthManager.loadOrCreate();
 
-      final sessionManager = await SessionManager.create(identityManager);
+      final sessionManager =
+          await SessionManager.create(identityManager, preKeyManager);
 
       final relayUri = Uri.parse(_kRelayUrlRaw);
       // Fail loud on a misconfigured endpoint rather than letting a
