@@ -80,11 +80,9 @@ class MessageService {
   final SecureDatabase _db;
   final RelayService _relay;
   final RelayAuthManager _relayAuth;
-  // Held for symmetry with the SpectreServices container and to give
-  // future flows (e.g. on-demand session re-init from inside the send
-  // path) direct access without re-plumbing main.dart. Currently unused
-  // by this class — session-init is driven from the UI layer.
-  // ignore: unused_field
+  // Used by the inbound first-message flow to fetch a peer's PreKeyBundle
+  // and bootstrap a session on the fly when decryption fails for lack of
+  // one. See receiveMessage().
   final PrekeyService _prekeyService;
 
   final Uuid _uuid;
@@ -236,18 +234,39 @@ class MessageService {
 
     final conversationId = await _ensureConversation(senderId);
 
-    final String plaintext;
+    final timestamp =
+        DateTime.fromMillisecondsSinceEpoch(timestampMs, isUtc: true);
+
+    String? plaintext;
     try {
       plaintext = await _sessions.decryptMessage(senderId, ciphertextB64);
     } catch (e) {
+      // Signal "first message" flow: the very first ciphertext a peer
+      // sends us is a PreKeySignalMessage, and decryption fails here
+      // because we have no session for them yet. The receiver bootstraps
+      // its half of the session from the peer's published PreKeyBundle
+      // (the same bundle whose one-time prekey the sender already
+      // consumed when they built the PreKeySignalMessage), then retries.
       _log(
-        'decrypt failed from ${_redactId(senderId)} :: ${e.runtimeType}',
+        'decrypt failed from ${_redactId(senderId)} :: ${e.runtimeType} '
+        '-- attempting first-message session init',
       );
-      return;
+      final senderId = envelope['sender_id'] as String;
+      final bundle = await _prekeyService.fetchBundle(senderId);
+      if (bundle != null) {
+        await _sessions.initializeSession(senderId, bundle);
+        try {
+          plaintext = await _sessions.decryptMessage(senderId, ciphertextB64);
+        } catch (e2) {
+          _log(
+            'decrypt retry failed from ${_redactId(senderId)} '
+            ':: ${e2.runtimeType}',
+          );
+        }
+      } else {
+        _log('no prekey bundle for ${_redactId(senderId)}');
+      }
     }
-
-    final timestamp =
-        DateTime.fromMillisecondsSinceEpoch(timestampMs, isUtc: true);
 
     try {
       await _db.insertMessage(Message(
@@ -263,6 +282,11 @@ class MessageService {
     }
 
     _seenMessageIds.add(messageId);
+
+    // Still undecryptable after a session-init retry: the ciphertext is
+    // stored above for later reprocessing, but we emit nothing — there is
+    // no plaintext to hand the UI.
+    if (plaintext == null) return;
 
     if (!_decryptedController.isClosed) {
       _decryptedController.add(DecryptedMessage(

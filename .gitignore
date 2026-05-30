@@ -56,3 +56,4 @@ key.properties
 **/*.key
 **/*.crt
 local.properties
+.metadata
