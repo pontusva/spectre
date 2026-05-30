@@ -120,6 +120,27 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
       final sessionManager = await SessionManager.create(identityManager);
 
       final relayUri = Uri.parse(_kRelayUrlRaw);
+      // Fail loud on a misconfigured endpoint rather than letting a
+      // malformed URL surface later as an opaque "not upgraded to
+      // websocket" error. A whitespace in the path almost always means a
+      // shell-quoting mistake swallowed the next --dart-define flag into
+      // SPECTRE_RELAY_URL (e.g. the value spanned two flags in one quote).
+      if (relayUri.scheme != 'ws' && relayUri.scheme != 'wss') {
+        throw StateError(
+          'SPECTRE_RELAY_URL must use ws:// or wss:// '
+          '(got scheme "${relayUri.scheme}")',
+        );
+      }
+      if (!relayUri.hasAuthority ||
+          _kRelayUrlRaw.contains(' ') ||
+          relayUri.path.contains(' ')) {
+        throw StateError(
+          'SPECTRE_RELAY_URL is malformed: "$_kRelayUrlRaw". '
+          'Check that each --dart-define has its own value and no quote '
+          'spans two flags.',
+        );
+      }
+
       final relayService = RelayService(
         relayUrl: relayUri,
         identityManager: identityManager,
