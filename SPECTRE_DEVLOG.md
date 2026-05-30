@@ -19,7 +19,7 @@
 | Android Studio | Panda4 Patch1 |
 | Java | OpenJDK 21 (bundled in Android Studio JBR) |
 | Project path | ~/src/stacks/spectre_stack/spectre |
-| Relay path | ~/src/stacks/spectre_stack/spectre-relay |
+| Relay path | ~/src/stacks/spectre_stack/spectre-relay (also cloned at ~/dev/experiments/spectre-relay — edits applied there in Session 3) |
 | GitHub | both repos pushed, public |
 
 ---
@@ -282,6 +282,13 @@ build_runner: latest
 - consumeOneTimePrekey — atomic removal
 - validatePrekeyBundle — key size validation
 - Falls back to signed prekey only if OTP exhausted
+- FIX (session 3): signed_prekey_id now round-trips. PrekeyBundle/
+  PrekeyResponse had no field for it, so json.Unmarshal dropped the
+  client's uploaded id and getBundle could not echo it; recipients
+  decoded 0 and threw InvalidKeyIdException("No such signedprekeyrecord! 0").
+  Added the field to both structs, copy it through getBundle, and reject
+  a zero id at register time (ids are 1-based). Existing registrations
+  self-heal on reconnect via idempotent uploadBundle.
 
 #### server/router.go
 - Per-userID rate limiting (NAT-aware)
@@ -683,7 +690,7 @@ cryptographer review. C2/H1/H2/NEW-HIGH-1 are blocking for production.
 - [x] Ed25519 auth working
 - [x] Prekey bundle registered on relay
 - [x] First encrypted message sent (loopback)
-- [ ] Two real devices connected
+- [x] Two real devices connected (send + receive working — via DEV sender-attribution wrapper, NOT sealed sender; relay can read `from`)
 - [ ] First message between Linux and iPhone
 - [ ] Relay deployed to VPS with real TLS
 - [ ] Android tested
@@ -691,5 +698,5 @@ cryptographer review. C2/H1/H2/NEW-HIGH-1 are blocking for production.
 
 ---
 
-Last updated: Session 2 complete
-Next session: iPhone setup on Mac + first real two-device message
+Last updated: Session 3 (2026-05-30) — signed_prekey_id round-trip fixed; two-device send+receive working via DEV attribution wrapper
+Next session: wire real Sealed Sender into send/receive (retire DEV wrapper), enforce C2 cert↔PreKey-identity binding, then address H1/H2/NEW-HIGH-1 before any production use
