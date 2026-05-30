@@ -140,6 +140,16 @@ class MessageService {
         _relayAuth = relayAuthManager,
         _prekeyService = prekeyService,
         _uuid = uuid ?? const Uuid() {
+    // Announce the sender-attribution mode once at startup. SPECTRE_DEV_
+    // ATTRIBUTION is a compile-time const, so it only takes effect on a full
+    // `flutter run` (not hot reload/restart) and must be set on BOTH the
+    // sender and receiver builds. This line lets you confirm the flag
+    // actually reached this build instead of inferring it from dropped
+    // envelopes.
+    _log(kDevSenderAttribution
+        ? 'sender attribution: DEV cleartext wrapper (insecure — local testing only)'
+        : 'sender attribution: OFF (sealed envelopes have no sender until '
+            'Sealed Sender is wired — inbound will be dropped)');
     _incomingSub = _relay.incoming.listen(_onRelayFrame);
     _stateSub = _relay.connectionState.listen((state) {
       if (state == RelayConnectionState.connected) {
