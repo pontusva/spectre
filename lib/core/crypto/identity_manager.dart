@@ -28,6 +28,10 @@ class IdentityManager {
   static const _kIdentityKeyPair = 'spectre.idkp';
   static const _kRegistrationId = 'spectre.regid';
   static const _kUserId = 'spectre.uid';
+  // Optional, user-chosen profile name. Local on this device; transmitted only
+  // INSIDE end-to-end-encrypted messages (never to the relay) so contacts can
+  // see a name instead of the raw user ID. Not identity material — just a label.
+  static const _kDisplayName = 'spectre.dn';
 
   final FlutterSecureStorage _storage;
 
@@ -54,6 +58,30 @@ class IdentityManager {
   IdentityKeyPair? _cachedIdentityKeyPair;
   int? _cachedRegistrationId;
   String? _cachedUserId;
+  String? _cachedDisplayName;
+  bool _displayNameLoaded = false;
+
+  /// The user's chosen profile name, or null if unset. Local-only at rest;
+  /// see [_kDisplayName]. Cached after first read.
+  Future<String?> displayName() async {
+    if (_displayNameLoaded) return _cachedDisplayName;
+    _cachedDisplayName = await _storage.read(key: _kDisplayName);
+    _displayNameLoaded = true;
+    return _cachedDisplayName;
+  }
+
+  /// Sets (or, with null/empty, clears) the profile name.
+  Future<void> setDisplayName(String? name) async {
+    final trimmed = name?.trim();
+    if (trimmed == null || trimmed.isEmpty) {
+      await _storage.delete(key: _kDisplayName);
+      _cachedDisplayName = null;
+    } else {
+      await _storage.write(key: _kDisplayName, value: trimmed);
+      _cachedDisplayName = trimmed;
+    }
+    _displayNameLoaded = true;
+  }
 
   /// Cheap probe used by the router/redirect layer to decide whether
   /// the user is past onboarding. Reads only the identity key entry —
@@ -168,6 +196,7 @@ class IdentityManager {
     await _storage.delete(key: _kIdentityKeyPair);
     await _storage.delete(key: _kRegistrationId);
     await _storage.delete(key: _kUserId);
+    await _storage.delete(key: _kDisplayName);
 
     // Zero out in-memory references. Dart strings are immutable so we can't
     // actually scrub the bytes — the best we can do is drop references and
@@ -177,6 +206,8 @@ class IdentityManager {
     _cachedIdentityKeyPair = null;
     _cachedRegistrationId = null;
     _cachedUserId = null;
+    _cachedDisplayName = null;
+    _displayNameLoaded = false;
   }
 
   static String _generateUserId() {

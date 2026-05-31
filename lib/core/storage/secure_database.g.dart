@@ -1135,6 +1135,17 @@ class $ContactsTable extends Contacts
     ),
     defaultValue: const Constant(false),
   );
+  static const VerificationMeta _peerNameMeta = const VerificationMeta(
+    'peerName',
+  );
+  @override
+  late final GeneratedColumn<String> peerName = GeneratedColumn<String>(
+    'peer_name',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _createdAtMeta = const VerificationMeta(
     'createdAt',
   );
@@ -1153,6 +1164,7 @@ class $ContactsTable extends Contacts
     displayName,
     identityKeyFingerprint,
     isVerified,
+    peerName,
     createdAt,
   ];
   @override
@@ -1206,6 +1218,12 @@ class $ContactsTable extends Contacts
         isVerified.isAcceptableOrUnknown(data['is_verified']!, _isVerifiedMeta),
       );
     }
+    if (data.containsKey('peer_name')) {
+      context.handle(
+        _peerNameMeta,
+        peerName.isAcceptableOrUnknown(data['peer_name']!, _peerNameMeta),
+      );
+    }
     if (data.containsKey('created_at')) {
       context.handle(
         _createdAtMeta,
@@ -1243,6 +1261,10 @@ class $ContactsTable extends Contacts
         DriftSqlType.bool,
         data['${effectivePrefix}is_verified'],
       )!,
+      peerName: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}peer_name'],
+      ),
       createdAt: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}created_at'],
@@ -1262,6 +1284,7 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
   final String? displayName;
   final String identityKeyFingerprint;
   final bool isVerified;
+  final String? peerName;
   final int createdAt;
   const ContactRow({
     required this.id,
@@ -1269,6 +1292,7 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
     this.displayName,
     required this.identityKeyFingerprint,
     required this.isVerified,
+    this.peerName,
     required this.createdAt,
   });
   @override
@@ -1281,6 +1305,9 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
     }
     map['identity_key_fingerprint'] = Variable<String>(identityKeyFingerprint);
     map['is_verified'] = Variable<bool>(isVerified);
+    if (!nullToAbsent || peerName != null) {
+      map['peer_name'] = Variable<String>(peerName);
+    }
     map['created_at'] = Variable<int>(createdAt);
     return map;
   }
@@ -1294,6 +1321,9 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
           : Value(displayName),
       identityKeyFingerprint: Value(identityKeyFingerprint),
       isVerified: Value(isVerified),
+      peerName: peerName == null && nullToAbsent
+          ? const Value.absent()
+          : Value(peerName),
       createdAt: Value(createdAt),
     );
   }
@@ -1311,6 +1341,7 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
         json['identityKeyFingerprint'],
       ),
       isVerified: serializer.fromJson<bool>(json['isVerified']),
+      peerName: serializer.fromJson<String?>(json['peerName']),
       createdAt: serializer.fromJson<int>(json['createdAt']),
     );
   }
@@ -1325,6 +1356,7 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
         identityKeyFingerprint,
       ),
       'isVerified': serializer.toJson<bool>(isVerified),
+      'peerName': serializer.toJson<String?>(peerName),
       'createdAt': serializer.toJson<int>(createdAt),
     };
   }
@@ -1335,6 +1367,7 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
     Value<String?> displayName = const Value.absent(),
     String? identityKeyFingerprint,
     bool? isVerified,
+    Value<String?> peerName = const Value.absent(),
     int? createdAt,
   }) => ContactRow(
     id: id ?? this.id,
@@ -1343,6 +1376,7 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
     identityKeyFingerprint:
         identityKeyFingerprint ?? this.identityKeyFingerprint,
     isVerified: isVerified ?? this.isVerified,
+    peerName: peerName.present ? peerName.value : this.peerName,
     createdAt: createdAt ?? this.createdAt,
   );
   ContactRow copyWithCompanion(ContactsCompanion data) {
@@ -1358,6 +1392,7 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
       isVerified: data.isVerified.present
           ? data.isVerified.value
           : this.isVerified,
+      peerName: data.peerName.present ? data.peerName.value : this.peerName,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
     );
   }
@@ -1370,6 +1405,7 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
           ..write('displayName: $displayName, ')
           ..write('identityKeyFingerprint: $identityKeyFingerprint, ')
           ..write('isVerified: $isVerified, ')
+          ..write('peerName: $peerName, ')
           ..write('createdAt: $createdAt')
           ..write(')'))
         .toString();
@@ -1382,6 +1418,7 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
     displayName,
     identityKeyFingerprint,
     isVerified,
+    peerName,
     createdAt,
   );
   @override
@@ -1393,6 +1430,7 @@ class ContactRow extends DataClass implements Insertable<ContactRow> {
           other.displayName == this.displayName &&
           other.identityKeyFingerprint == this.identityKeyFingerprint &&
           other.isVerified == this.isVerified &&
+          other.peerName == this.peerName &&
           other.createdAt == this.createdAt);
 }
 
@@ -1402,6 +1440,7 @@ class ContactsCompanion extends UpdateCompanion<ContactRow> {
   final Value<String?> displayName;
   final Value<String> identityKeyFingerprint;
   final Value<bool> isVerified;
+  final Value<String?> peerName;
   final Value<int> createdAt;
   final Value<int> rowid;
   const ContactsCompanion({
@@ -1410,6 +1449,7 @@ class ContactsCompanion extends UpdateCompanion<ContactRow> {
     this.displayName = const Value.absent(),
     this.identityKeyFingerprint = const Value.absent(),
     this.isVerified = const Value.absent(),
+    this.peerName = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
@@ -1419,6 +1459,7 @@ class ContactsCompanion extends UpdateCompanion<ContactRow> {
     this.displayName = const Value.absent(),
     required String identityKeyFingerprint,
     this.isVerified = const Value.absent(),
+    this.peerName = const Value.absent(),
     required int createdAt,
     this.rowid = const Value.absent(),
   }) : id = Value(id),
@@ -1431,6 +1472,7 @@ class ContactsCompanion extends UpdateCompanion<ContactRow> {
     Expression<String>? displayName,
     Expression<String>? identityKeyFingerprint,
     Expression<bool>? isVerified,
+    Expression<String>? peerName,
     Expression<int>? createdAt,
     Expression<int>? rowid,
   }) {
@@ -1441,6 +1483,7 @@ class ContactsCompanion extends UpdateCompanion<ContactRow> {
       if (identityKeyFingerprint != null)
         'identity_key_fingerprint': identityKeyFingerprint,
       if (isVerified != null) 'is_verified': isVerified,
+      if (peerName != null) 'peer_name': peerName,
       if (createdAt != null) 'created_at': createdAt,
       if (rowid != null) 'rowid': rowid,
     });
@@ -1452,6 +1495,7 @@ class ContactsCompanion extends UpdateCompanion<ContactRow> {
     Value<String?>? displayName,
     Value<String>? identityKeyFingerprint,
     Value<bool>? isVerified,
+    Value<String?>? peerName,
     Value<int>? createdAt,
     Value<int>? rowid,
   }) {
@@ -1462,6 +1506,7 @@ class ContactsCompanion extends UpdateCompanion<ContactRow> {
       identityKeyFingerprint:
           identityKeyFingerprint ?? this.identityKeyFingerprint,
       isVerified: isVerified ?? this.isVerified,
+      peerName: peerName ?? this.peerName,
       createdAt: createdAt ?? this.createdAt,
       rowid: rowid ?? this.rowid,
     );
@@ -1487,6 +1532,9 @@ class ContactsCompanion extends UpdateCompanion<ContactRow> {
     if (isVerified.present) {
       map['is_verified'] = Variable<bool>(isVerified.value);
     }
+    if (peerName.present) {
+      map['peer_name'] = Variable<String>(peerName.value);
+    }
     if (createdAt.present) {
       map['created_at'] = Variable<int>(createdAt.value);
     }
@@ -1504,6 +1552,7 @@ class ContactsCompanion extends UpdateCompanion<ContactRow> {
           ..write('displayName: $displayName, ')
           ..write('identityKeyFingerprint: $identityKeyFingerprint, ')
           ..write('isVerified: $isVerified, ')
+          ..write('peerName: $peerName, ')
           ..write('createdAt: $createdAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
@@ -2305,6 +2354,7 @@ typedef $$ContactsTableCreateCompanionBuilder =
       Value<String?> displayName,
       required String identityKeyFingerprint,
       Value<bool> isVerified,
+      Value<String?> peerName,
       required int createdAt,
       Value<int> rowid,
     });
@@ -2315,6 +2365,7 @@ typedef $$ContactsTableUpdateCompanionBuilder =
       Value<String?> displayName,
       Value<String> identityKeyFingerprint,
       Value<bool> isVerified,
+      Value<String?> peerName,
       Value<int> createdAt,
       Value<int> rowid,
     });
@@ -2350,6 +2401,11 @@ class $$ContactsTableFilterComposer
 
   ColumnFilters<bool> get isVerified => $composableBuilder(
     column: $table.isVerified,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get peerName => $composableBuilder(
+    column: $table.peerName,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -2393,6 +2449,11 @@ class $$ContactsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get peerName => $composableBuilder(
+    column: $table.peerName,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<int> get createdAt => $composableBuilder(
     column: $table.createdAt,
     builder: (column) => ColumnOrderings(column),
@@ -2428,6 +2489,9 @@ class $$ContactsTableAnnotationComposer
     column: $table.isVerified,
     builder: (column) => column,
   );
+
+  GeneratedColumn<String> get peerName =>
+      $composableBuilder(column: $table.peerName, builder: (column) => column);
 
   GeneratedColumn<int> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
@@ -2469,6 +2533,7 @@ class $$ContactsTableTableManager
                 Value<String?> displayName = const Value.absent(),
                 Value<String> identityKeyFingerprint = const Value.absent(),
                 Value<bool> isVerified = const Value.absent(),
+                Value<String?> peerName = const Value.absent(),
                 Value<int> createdAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ContactsCompanion(
@@ -2477,6 +2542,7 @@ class $$ContactsTableTableManager
                 displayName: displayName,
                 identityKeyFingerprint: identityKeyFingerprint,
                 isVerified: isVerified,
+                peerName: peerName,
                 createdAt: createdAt,
                 rowid: rowid,
               ),
@@ -2487,6 +2553,7 @@ class $$ContactsTableTableManager
                 Value<String?> displayName = const Value.absent(),
                 required String identityKeyFingerprint,
                 Value<bool> isVerified = const Value.absent(),
+                Value<String?> peerName = const Value.absent(),
                 required int createdAt,
                 Value<int> rowid = const Value.absent(),
               }) => ContactsCompanion.insert(
@@ -2495,6 +2562,7 @@ class $$ContactsTableTableManager
                 displayName: displayName,
                 identityKeyFingerprint: identityKeyFingerprint,
                 isVerified: isVerified,
+                peerName: peerName,
                 createdAt: createdAt,
                 rowid: rowid,
               ),

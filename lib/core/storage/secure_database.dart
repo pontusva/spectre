@@ -119,6 +119,10 @@ class Contacts extends Table {
   BoolColumn get isVerified =>
       boolean().withDefault(const Constant(false))();
 
+  // The name the peer chose for themselves, received E2E with their messages.
+  // Distinct from displayName (the local nickname, which wins). Nullable.
+  TextColumn get peerName => text().nullable()();
+
   IntColumn get createdAt => integer()();
 
   @override
@@ -209,7 +213,7 @@ class SecureDatabase extends _$SecureDatabase {
   File? _dbFile;
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -226,6 +230,12 @@ class SecureDatabase extends _$SecureDatabase {
           // Chats — never the Requests inbox.
           if (from < 3) {
             await m.addColumn(conversations, conversations.requestState);
+          }
+          // v3 -> v4: add contacts.peerName (the peer's own display name,
+          // received E2E). Existing rows get null and keep showing the local
+          // nickname or truncated id.
+          if (from < 4) {
+            await m.addColumn(contacts, contacts.peerName);
           }
         },
       );
@@ -429,9 +439,18 @@ class SecureDatabase extends _$SecureDatabase {
         displayName: Value(c.displayName),
         identityKeyFingerprint: Value(c.identityKeyFingerprint),
         isVerified: Value(c.isVerified),
+        peerName: Value(c.peerName),
         createdAt: Value(c.createdAt.toUtc().millisecondsSinceEpoch),
       ),
     );
+  }
+
+  /// Records the name a peer chose for themselves (received E2E). Does NOT
+  /// touch the local nickname (displayName) or verification. No-op if the
+  /// contact row doesn't exist yet.
+  Future<int> updateContactPeerName(String userId, String? peerName) {
+    return (update(contacts)..where((c) => c.userId.equals(userId)))
+        .write(ContactsCompanion(peerName: Value(peerName)));
   }
 
   Future<Contact?> getContact(String userId) async {
@@ -588,6 +607,7 @@ class SecureDatabase extends _$SecureDatabase {
         displayName: r.displayName,
         identityKeyFingerprint: r.identityKeyFingerprint,
         isVerified: r.isVerified,
+        peerName: r.peerName,
         createdAt:
             DateTime.fromMillisecondsSinceEpoch(r.createdAt, isUtc: true),
       );

@@ -20,6 +20,7 @@ class OnboardingScreen extends StatefulWidget {
 class _OnboardingScreenState extends State<OnboardingScreen> {
   final PageController _pageController = PageController();
   final ScrollController _fingerprintScroll = ScrollController();
+  final TextEditingController _nameController = TextEditingController();
 
   int _step = 0;
   SpectreIdentity? _identity;
@@ -43,6 +44,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     _fingerprintScroll.removeListener(_onFingerprintScroll);
     _fingerprintScroll.dispose();
     _pageController.dispose();
+    _nameController.dispose();
     super.dispose();
   }
 
@@ -119,6 +121,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   Future<void> _complete() async {
     if (_completing) return;
     setState(() => _completing = true);
+    // Persist the chosen display name (optional; setDisplayName trims + treats
+    // empty as "unset"). Local at rest; shared only inside E2E messages.
+    await widget.services.identityManager.setDisplayName(_nameController.text);
     // Hand control back to the app shell; it rebuilds the router with
     // hasIdentity=true and the redirect carries us to /conversations.
     widget.services.onInitiate();
@@ -145,6 +150,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         generating: _generating,
                         identity: _identity,
                         error: _error,
+                        nameController: _nameController,
                         onContinue: _advance,
                         onRetry: () {
                           setState(() {
@@ -216,6 +222,7 @@ class _InitiateStep extends StatelessWidget {
     required this.generating,
     required this.identity,
     required this.error,
+    required this.nameController,
     required this.onContinue,
     required this.onRetry,
   });
@@ -223,6 +230,7 @@ class _InitiateStep extends StatelessWidget {
   final bool generating;
   final SpectreIdentity? identity;
   final Object? error;
+  final TextEditingController nameController;
   final VoidCallback onContinue;
   final VoidCallback onRetry;
 
@@ -262,11 +270,53 @@ class _InitiateStep extends StatelessWidget {
                     ? const _GeneratingReadout()
                     : _IdentityReadout(identity: identity!)),
           ),
+          if (identity != null && error == null) ...<Widget>[
+            Text(
+              'DISPLAY NAME (OPTIONAL)',
+              style: SpectreTypography.caption().copyWith(
+                color: SpectreColors.textDim,
+                letterSpacing: 2,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Container(
+              decoration: const BoxDecoration(
+                color: SpectreColors.blackDeep,
+                border: Border.fromBorderSide(
+                  BorderSide(color: SpectreColors.hairline, width: 1),
+                ),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: TextField(
+                controller: nameController,
+                maxLength: 40,
+                cursorColor: SpectreColors.matrixGreen,
+                style: SpectreTypography.mono()
+                    .copyWith(color: SpectreColors.textBright),
+                decoration: InputDecoration(
+                  isCollapsed: true,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                  border: InputBorder.none,
+                  counterText: '',
+                  hintText: 'how contacts see you',
+                  hintStyle: SpectreTypography.mono()
+                      .copyWith(color: SpectreColors.textFaint),
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'shared only with people you message (end-to-end) — never the '
+              'relay. you can change or clear it later in settings.',
+              style: SpectreTypography.caption().copyWith(
+                color: SpectreColors.textFaint,
+                height: 1.5,
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           _ActionButton(
-            label: identity == null
-                ? '[ CONTINUE ]'
-                : '[ CONTINUE ]',
+            label: '[ CONTINUE ]',
             enabled: identity != null && error == null,
             onTap: onContinue,
           ),

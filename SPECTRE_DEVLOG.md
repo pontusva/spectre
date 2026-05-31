@@ -418,6 +418,19 @@ CHANGED (registry above predates these):
 - Tests: contacts_requests_test (peerLabel, nextStateOnOutbound, shouldDropInbound,
   Conversation round-trip). 24 client tests green.
 
+### Session 5 — own display name (shared E2E) + UI fixes
+
+- Own display name: set at onboarding (optional field) + editable in Settings.
+  Stored locally (IdentityManager displayName/setDisplayName, key spectre.dn);
+  transmitted INSIDE the E2E message payload (wrap {v:1,n,t}; legacy raw text
+  still decodes) — relay never sees it. On receive stored in Contact.peerName
+  (schema v4). peerLabel priority: local nickname (displayName) > peerName >
+  truncated id. Invitation carries the name too.
+- Fix: conversation list now refreshes on return (RouteObserver/RouteAware) —
+  nickname/accept/block changes show without waiting for an incoming message.
+- Fix: contrast pass in app_theme (text tiers + purpleBright/redDanger/hairline)
+  for readable helper text on the near-black UI.
+
 ### PENDING
 
 - lib/ui/screens/qr_code_screen.dart

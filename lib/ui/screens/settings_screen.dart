@@ -64,6 +64,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _copied = false;
   Timer? _copiedTimer;
 
+  String? _displayName;
+
   bool _torOn = false;
   bool _torStub = false;
   Timer? _torStubTimer;
@@ -98,13 +100,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (pk != null) {
       lastRotation = await pk.lastSignedPreKeyRotation();
     }
+    final displayName = await widget.services.identityManager.displayName();
 
     if (!mounted) return;
     setState(() {
       _disappearing = _Disappearing.fromSeconds(seconds);
       _lastRotation = lastRotation;
+      _displayName = displayName;
       _loading = false;
     });
+  }
+
+  Future<void> _editDisplayName() async {
+    final result = await showDialog<String>(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.7),
+      builder: (ctx) => _DisplayNameDialog(initial: _displayName ?? ''),
+    );
+    if (result == null || !mounted) return; // cancelled
+    await widget.services.identityManager.setDisplayName(result);
+    final fresh = await widget.services.identityManager.displayName();
+    if (!mounted) return;
+    setState(() => _displayName = fresh);
   }
 
   Future<void> _setDisappearing(_Disappearing value) async {
@@ -267,6 +284,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
+          Text(
+            'display name',
+            style: SpectreTypography.caption().copyWith(
+              color: SpectreColors.textDim,
+              letterSpacing: 2.4,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            decoration: const BoxDecoration(
+              color: SpectreColors.blackLess,
+              border: Border.fromBorderSide(
+                BorderSide(color: SpectreColors.hairline, width: 1),
+              ),
+            ),
+            child: Text(
+              (_displayName != null && _displayName!.isNotEmpty)
+                  ? _displayName!
+                  : '— not set —',
+              style: SpectreTypography.mono().copyWith(
+                color: (_displayName != null && _displayName!.isNotEmpty)
+                    ? SpectreColors.textBright
+                    : SpectreColors.textFaint,
+                fontSize: 14.5,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: <Widget>[
+              _InlineButton(
+                label: '[ EDIT NAME ]',
+                color: SpectreColors.textBright,
+                borderColor: SpectreColors.hairline,
+                onTap: _editDisplayName,
+              ),
+            ],
+          ),
+          const SizedBox(height: 26),
+          Container(height: 1, color: SpectreColors.hairline),
+          const SizedBox(height: 18),
           Text(
             'spectre id',
             style: SpectreTypography.caption().copyWith(
@@ -850,6 +910,97 @@ class _PanicWipeDialog extends StatelessWidget {
                         ),
                       ),
                     ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Prefilled editor for the user's own display name. Pops the new value
+/// (empty = clear) on SAVE, or null on CANCEL. Mirrors the contact nickname
+/// editor; the name is shared with peers (E2E), never the relay.
+class _DisplayNameDialog extends StatefulWidget {
+  const _DisplayNameDialog({required this.initial});
+
+  final String initial;
+
+  @override
+  State<_DisplayNameDialog> createState() => _DisplayNameDialogState();
+}
+
+class _DisplayNameDialogState extends State<_DisplayNameDialog> {
+  late final TextEditingController _c =
+      TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: SpectreColors.blackLess,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.zero,
+        side: BorderSide(color: SpectreColors.purpleBright, width: 1),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              'DISPLAY NAME',
+              style: SpectreTypography.title()
+                  .copyWith(letterSpacing: 3, fontSize: 14),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'how contacts see you. shared end-to-end with people you message, '
+              'never with the relay. leave empty to clear.',
+              style: SpectreTypography.caption()
+                  .copyWith(color: SpectreColors.textDim, height: 1.6),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _c,
+              autofocus: true,
+              maxLength: 40,
+              cursorColor: SpectreColors.matrixGreen,
+              style: SpectreTypography.mono()
+                  .copyWith(color: SpectreColors.textBright),
+              decoration: const InputDecoration(
+                counterText: '',
+                hintText: 'name',
+              ),
+              onSubmitted: (v) => Navigator.of(context).pop(v),
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: <Widget>[
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: Text(
+                    'CANCEL',
+                    style: SpectreTypography.action()
+                        .copyWith(color: SpectreColors.textDim),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(_c.text),
+                  child: Text(
+                    'SAVE',
+                    style: SpectreTypography.action()
+                        .copyWith(color: SpectreColors.matrixGreen),
                   ),
                 ),
               ],

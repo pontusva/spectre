@@ -4,12 +4,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:spectre/core/models/contact.dart';
 import 'package:spectre/core/models/conversation.dart';
 
-Contact _contact({String? displayName}) => Contact(
+Contact _contact({String? displayName, String? peerName}) => Contact(
       id: 'c',
       userId: 'u',
       identityKeyFingerprint: '00',
       createdAt: DateTime.utc(2020),
       displayName: displayName,
+      peerName: peerName,
     );
 
 void main() {
@@ -22,6 +23,15 @@ void main() {
     });
     test('falls back when nickname is empty', () {
       expect(peerLabel(_contact(displayName: ''), 'TRUNC'), 'TRUNC');
+    });
+    test('uses the peer self-name when no local nickname', () {
+      expect(peerLabel(_contact(peerName: 'bob'), 'TRUNC'), 'bob');
+    });
+    test('local nickname wins over the peer self-name', () {
+      expect(
+        peerLabel(_contact(displayName: 'mine', peerName: 'theirs'), 'TRUNC'),
+        'mine',
+      );
     });
   });
 

@@ -7,12 +7,18 @@
 /// scanning a QR, reading the words aloud in person, or exchanging
 /// them on a separately-trusted channel. Programmatic verification is
 /// explicitly NOT allowed; the boolean is a record of human attestation.
-/// The label to show for a peer: their local nickname if set, otherwise the
-/// caller-supplied fallback (typically the truncated user ID). Pure — unit
-/// tested. [contact] may be null (no contact row yet → fallback).
+/// The label to show for a peer, in priority order:
+///   1. [Contact.displayName] — the LOCAL nickname I set (always wins).
+///   2. [Contact.peerName] — the name the peer chose for themselves, received
+///      E2E with their messages.
+///   3. the caller-supplied fallback (typically the truncated user ID).
+/// Pure — unit tested. [contact] may be null (no contact row yet → fallback).
 String peerLabel(Contact? contact, String fallbackTruncatedId) {
-  final name = contact?.displayName;
-  return (name != null && name.isNotEmpty) ? name : fallbackTruncatedId;
+  final nick = contact?.displayName;
+  if (nick != null && nick.isNotEmpty) return nick;
+  final self = contact?.peerName;
+  if (self != null && self.isNotEmpty) return self;
+  return fallbackTruncatedId;
 }
 
 class Contact {
@@ -35,6 +41,11 @@ class Contact {
   /// doc above — never set this programmatically.
   final bool isVerified;
 
+  /// The name the PEER chose for themselves, received inside their E2E
+  /// messages. Distinct from [displayName] (my local nickname, which wins).
+  /// Null until they send something carrying a name.
+  final String? peerName;
+
   final DateTime createdAt;
 
   const Contact({
@@ -44,6 +55,7 @@ class Contact {
     required this.createdAt,
     this.displayName,
     this.isVerified = false,
+    this.peerName,
   });
 
   /// Human-readable representation of [identityKeyFingerprint] as a
@@ -91,6 +103,7 @@ class Contact {
       displayName: map['display_name'] as String?,
       identityKeyFingerprint: map['identity_key_fingerprint'] as String,
       isVerified: (map['verified'] as int) != 0,
+      peerName: map['peer_name'] as String?,
       createdAt: DateTime.fromMillisecondsSinceEpoch(
         map['created_at'] as int,
         isUtc: true,
@@ -105,6 +118,7 @@ class Contact {
       'display_name': displayName,
       'identity_key_fingerprint': identityKeyFingerprint,
       'verified': isVerified ? 1 : 0,
+      'peer_name': peerName,
       'created_at': createdAt.toUtc().millisecondsSinceEpoch,
     };
   }
@@ -112,6 +126,7 @@ class Contact {
   Contact copyWith({
     String? displayName,
     bool? isVerified,
+    String? peerName,
   }) {
     return Contact(
       id: id,
@@ -120,6 +135,7 @@ class Contact {
       createdAt: createdAt,
       displayName: displayName ?? this.displayName,
       isVerified: isVerified ?? this.isVerified,
+      peerName: peerName ?? this.peerName,
     );
   }
 

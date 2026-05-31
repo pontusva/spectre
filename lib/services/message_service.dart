@@ -207,7 +207,12 @@ class MessageService {
 
     final String ciphertextB64;
     try {
-      ciphertextB64 = await _sessions.encryptMessage(recipientId, plaintext);
+      // Wrap our own display name in with the text (E2E only — the relay
+      // never sees it) so the recipient can show our name instead of the raw
+      // id. The DB/cache below store just the text, never the wrapper.
+      final myName = await _identity.displayName();
+      final payload = _encodeOutgoing(myName, plaintext);
+      ciphertextB64 = await _sessions.encryptMessage(recipientId, payload);
     } catch (e) {
       _log('encrypt failed for ${_redactId(recipientId)} :: ${e.runtimeType}');
       return MessageStatus.failed;
@@ -446,9 +451,9 @@ class MessageService {
     final timestamp =
         DateTime.fromMillisecondsSinceEpoch(timestampMs, isUtc: true);
 
-    String? plaintext;
+    String? payload;
     try {
-      plaintext = await _sessions.decryptMessage(senderId, ciphertextB64);
+      payload = await _sessions.decryptMessage(senderId, ciphertextB64);
     } catch (e) {
       // Signal "first message" flow: the very first ciphertext a peer
       // sends us is a PreKeySignalMessage, and decryption fails here
@@ -464,7 +469,7 @@ class MessageService {
       if (bundle != null) {
         await _sessions.initializeSession(senderId, bundle);
         try {
-          plaintext = await _sessions.decryptMessage(senderId, ciphertextB64);
+          payload = await _sessions.decryptMessage(senderId, ciphertextB64);
         } catch (e2) {
           _log(
             'decrypt retry failed from ${_redactId(senderId)} '
@@ -475,6 +480,12 @@ class MessageService {
         _log('no prekey bundle for ${_redactId(senderId)}');
       }
     }
+
+    // The decrypted payload carries the sender's display name + the text.
+    // (Legacy/raw messages decode as text with no name.)
+    final decoded = payload == null ? null : _decodeIncoming(payload);
+    final String? plaintext = decoded?.text;
+    final String? peerName = decoded?.name;
 
     try {
       await _db.insertMessage(Message(
@@ -511,6 +522,15 @@ class MessageService {
       senderKeyChanged = await _checkAndPinIdentity(conversationId, senderId);
     } catch (e) {
       _log('identity pin check failed :: ${e.runtimeType}');
+    }
+
+    // Record the peer's own display name (received E2E) — the contact exists
+    // by now (pinned above). Their local nickname, if I set one, still wins in
+    // peerLabel(). Best-effort.
+    if (peerName != null && peerName.isNotEmpty) {
+      try {
+        await _db.updateContactPeerName(senderId, peerName);
+      } catch (_) {/* contact row may not exist yet */}
     }
 
     if (!_decryptedController.isClosed) {
@@ -611,7 +631,30 @@ class MessageService {
       createdAt: existing?.createdAt ?? DateTime.now().toUtc(),
       displayName: existing?.displayName,
       isVerified: false,
+      peerName: existing?.peerName,
     ));
+  }
+
+  /// Wraps the sender's display name + text into the plaintext that gets
+  /// ratchet-encrypted. Versioned JSON so the receiver tells it apart from a
+  /// legacy raw-text message. Name omitted when unset.
+  String _encodeOutgoing(String? name, String text) {
+    final m = <String, Object?>{'v': 1, 't': text};
+    if (name != null && name.isNotEmpty) m['n'] = name;
+    return jsonEncode(m);
+  }
+
+  /// Inverse of [_encodeOutgoing]. A legacy/raw message (no v:1 wrapper, e.g.
+  /// from an older peer build) decodes as text with no name.
+  ({String? name, String text}) _decodeIncoming(String raw) {
+    try {
+      final m = jsonDecode(raw);
+      if (m is Map<String, dynamic> && m['v'] == 1 && m['t'] is String) {
+        final n = m['n'];
+        return (name: n is String ? n : null, text: m['t'] as String);
+      }
+    } catch (_) {/* not our wrapper — treat as raw text */}
+    return (name: null, text: raw);
   }
 
   Future<void> _onRelayFrame(Map<String, dynamic> envelope) async {

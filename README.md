@@ -68,8 +68,10 @@ identity as unconfirmed.
 - **Message requests** — inbound from a peer you haven't accepted lands in a
   Requests inbox (long-press → **Accept** / **Block**); one-sided, no mutual
   add, auto-accepts if you both reach out. Block is silent + persistent.
-- **Nicknames** — optional local label per contact, shown instead of the random
-  ID (the ID stays on the peer screen). Local-only, never sent.
+- **Names** — set your own display name at onboarding (or in Settings); it's
+  sent E2E (never to the relay) so contacts see it instead of your ID. You can
+  also set a private local **nickname** per contact, which always wins over the
+  name they chose. The raw ID stays on the peer screen.
 - No phone numbers — random base64url user IDs, never PII.
 - Encrypted-at-rest history (SQLCipher), disappearing-message timers.
 - Panic wipe — destroys identity, sessions, prekeys, DB key, and CA pin.
