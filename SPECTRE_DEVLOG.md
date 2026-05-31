@@ -126,8 +126,11 @@ build_runner: latest
 - initializeSession(recipientId, PreKeyBundle) — Signal X3DH handshake
 - encryptMessage / decryptMessage — ratcheting E2E
 - CiphertextMessage.PREKEY_TYPE / WHISPER_TYPE
-- CRITICAL doc: transport MUST wrap with SealedSessionCipher
 - hasSession, deleteSession, wipeAllSessions
+- (Session 3) SealedSessionCipher does NOT exist in libsignal_protocol_dart —
+  sealed sender is built in-house (see sealed_sender.dart). Added
+  remoteIdentityKey() (pinned peer key, no OTPK burn) and
+  assertFirstContactIdentity() (C2 binding, constant-time, parse-only).
 
 #### lib/core/crypto/relay_auth_manager.dart (NEW — session 2)
 
@@ -362,6 +365,38 @@ build_runner: latest
 - read_only: true
 - /tmp as tmpfs
 
+### Session 3 — Sealed Sender, verification, readable history
+
+NEW files:
+- lib/core/crypto/sealed_sender.dart — in-house sealed-sender cipher
+  (ephemeral X25519 → HKDF-SHA256 → ChaCha20-Poly1305, recipient-id AAD,
+  signed-cert verify). The construction; needs external review.
+- lib/services/network/sealed_ca_service.dart — fetch + TOFU-pin the relay
+  CA pubkey (GET /sealed-ca); mismatch fails closed.
+- spectre-relay/server/sealed_ca.go — relay CA signing key + IssueCert.
+- spectre-relay/server/ratelimit.go — per-user sliding-window limiter (certs).
+- test/identity_pin_test.dart, spectre-relay/server/sealed_ca_test.go,
+  spectre-relay/server/sealed_cert_test.go.
+
+CHANGED (registry above predates these):
+- message_service.dart — sends seal via _sealForWire; receive opens + C2
+  binding (assertFirstContactIdentity); identity-key TOFU pin + change banner
+  flag (NEW-HIGH-1); persistent replay dedup via messageExists (H2); plaintext
+  now persisted (see below); RAM plaintext cache; the DEV cleartext shim was
+  REMOVED — sealed sender is the only wire path.
+- relay_service.dart — wire form reconciled to the Go SealedEnvelope
+  (timestamp_ms); ensureSenderCert + sender_cert frame + cert cache/refresh +
+  warm-on-connect; debug prints removed.
+- secure_database.dart — schema v2: messages.plaintext (encrypted at rest,
+  readable history); updateConversationKey (key pin); messageExists (replay).
+- message.dart — plaintext field (posture change, see Principle #2).
+- Go relay (server.go/auth.go) — /sealed-ca, request_sender_cert issuance
+  (uid/ik bound to authed user's registered bundle), cert rate limit; DEV
+  uid logs removed.
+- UI: chat_screen verification bar + key-changed banner + readable history;
+  conversation_list settings gear; /settings + /contact routed to the full
+  standalone screens (inline duplicates removed).
+
 ### PENDING
 
 - lib/ui/screens/qr_code_screen.dart
@@ -504,7 +539,9 @@ Requirements:
 - [ ] \_reconstructPendingQueue() on startup — not implemented
 - [ ] Session mutex — concurrent ratchet advances can corrupt state
 - [ ] No message ordering guarantee — need sequence numbers or vector clock
-- [ ] Sealed Sender transport enforcement — MUST wrap with SealedSessionCipher
+- [x] Sealed Sender transport enforcement — DONE in-house (no SealedSessionCipher
+  in libsignal_protocol_dart). See sealed_sender.dart + SEALED_SENDER_REVIEW.md.
+  Remaining: external cryptographer sign-off; H3/H4 construction hardening.
 
 ### Storage
 
@@ -575,7 +612,7 @@ Requirements:
 
 ---
 
-## Sealed Sender — Design (Session 3, in progress)
+## Sealed Sender — Design (Session 3 — wired; awaiting external review)
 
 ### Why this section exists
 
