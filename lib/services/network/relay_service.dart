@@ -214,9 +214,22 @@ class RelayService {
       // attempt fails.
       final ps = _prekeyService;
       if (ps != null) {
-        unawaited(ps.uploadBundle().catchError((_) {
-          // Swallow: bundle upload failures must not surface to the
-          // UI as connect errors. The next reconnect retries.
+        unawaited(ps.uploadBundle().then((_) async {
+          // Warm the sealed-sender certificate on the SAME connection, right
+          // after the prekey bundle. The relay reads WS frames in order, so
+          // issuing request_sender_cert AFTER register_prekeys guarantees the
+          // bundle is registered before the cert is minted — eliminating the
+          // cold-start race where the first send would otherwise wait out the
+          // cert timeout (issueSenderCert needs the bundle to exist). The cert
+          // lands in the cache so the first real send seals immediately.
+          // Best-effort: on failure the lazy request inside the send path is
+          // the fallback, and the next reconnect re-warms.
+          await ensureSenderCert(
+            nowMs: DateTime.now().toUtc().millisecondsSinceEpoch,
+          );
+        }).catchError((_) {
+          // Swallow: neither the bundle publish nor the cert warm-up should
+          // surface as a connect error. The next reconnect retries both.
         }));
       }
     } catch (_) {
