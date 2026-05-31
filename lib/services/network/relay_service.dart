@@ -517,8 +517,6 @@ class RelayService {
   }
 
   void _handleStreamError(Object error, StackTrace _) {
-    // ignore: avoid_print
-    print('AUTH ERROR: ${error.runtimeType}');
     if (!(_authCompleter?.isCompleted ?? true)) {
       _authCompleter!.completeError(error);
     }
@@ -526,8 +524,6 @@ class RelayService {
   }
 
   void _handleStreamDone() {
-    // ignore: avoid_print
-    print('AUTH ERROR: StreamDone');
     if (!(_authCompleter?.isCompleted ?? true)) {
       _authCompleter!.completeError(
         StateError('relay closed during auth'),
