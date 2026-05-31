@@ -65,6 +65,11 @@ identity as unconfirmed.
 - **Safety-number verification** — BIP-39-word fingerprints, two-column
   out-of-band comparison; identity keys are TOFU-pinned and a **key change is
   surfaced as a sticky warning**.
+- **Message requests** — inbound from a peer you haven't accepted lands in a
+  Requests inbox (long-press → **Accept** / **Block**); one-sided, no mutual
+  add, auto-accepts if you both reach out. Block is silent + persistent.
+- **Nicknames** — optional local label per contact, shown instead of the random
+  ID (the ID stays on the peer screen). Local-only, never sent.
 - No phone numbers — random base64url user IDs, never PII.
 - Encrypted-at-rest history (SQLCipher), disappearing-message timers.
 - Panic wipe — destroys identity, sessions, prekeys, DB key, and CA pin.
@@ -113,6 +118,12 @@ Then: **⚙ → copy your ID** on each device, paste it into **＋ new
 conversation** on the other, send — and **verify the safety number** before
 trusting the contact. Full step-by-step:
 [`SEALED_SENDER_TEST.md`](SEALED_SENDER_TEST.md).
+
+In a chat, tap the **verification bar at the top** to open the peer screen —
+that's where you **verify the safety number** and **set a nickname** (the
+"nickname (local only)" row → **[ EDIT ]**). A peer who messages *you* first
+shows up under **REQUESTS** in the conversation list; **long-press** to Accept
+or Block.
 
 `--dart-define=SPECTRE_RELAY_URL=ws://<host>:8080/ws` configures the relay
 endpoint; there is no hardcoded server.

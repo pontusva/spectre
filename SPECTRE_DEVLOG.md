@@ -397,6 +397,22 @@ CHANGED (registry above predates these):
   conversation_list settings gear; /settings + /contact routed to the full
   standalone screens (inline duplicates removed).
 
+### Session 4 — nicknames + one-sided message requests
+
+- Nicknames: Contact.displayName now settable (updateContactDisplayName) + shown
+  via peerLabel() in chat AppBar, conversation list, sheets. Edit on the contact
+  screen ([ EDIT ] row). No schema change.
+- Message requests (one-sided/Signal-style): conversations.requestState
+  (schema v3) {accepted,pending,blocked}; getRequests/getConversationByRecipient/
+  updateConversationState; _ensureConversation(incoming:) + auto-accept; receive
+  block-gate; REQUESTS section + Accept/Block sheet. CANARY: key-pin lookups
+  switched off getConversations() (now accepted-only) to getConversationByRecipient.
+- Contacts are now created/pinned on the SEND path too (not just receive), so an
+  outbound-only conversation has a fingerprint to verify and a contact to
+  nickname. (Was: nicknames/verification only worked after receiving.)
+- Tests: contacts_requests_test (peerLabel, nextStateOnOutbound, shouldDropInbound,
+  Conversation round-trip). 24 client tests green.
+
 ### PENDING
 
 - lib/ui/screens/qr_code_screen.dart

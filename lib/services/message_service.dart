@@ -247,6 +247,18 @@ class MessageService {
     // this session. Keyed by the DB row id so _loadHistory can recover it.
     _plaintextCache[messageId] = plaintext;
 
+    // Pin the peer key + create their contact on the SEND path too (receive
+    // does this via _checkAndPinIdentity). Without it, a conversation you
+    // started but never got a reply in has no contact row — so no safety
+    // number to verify and no nickname to set. Best-effort: the session was
+    // established by the chat screen before this send, so remoteIdentityKey is
+    // available; a failure must never block the send.
+    try {
+      await _checkAndPinIdentity(conversationId, recipientId);
+    } catch (e) {
+      _log('outbound identity pin failed :: ${e.runtimeType}');
+    }
+
     try {
       await _deliver(recipientId, ciphertextB64);
       return MessageStatus.sent;
