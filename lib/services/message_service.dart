@@ -152,6 +152,21 @@ class MessageService {
   /// state generally.
   final Set<String> _seenMessageIds = <String>{};
 
+  /// RAM-only plaintext cache, keyed by message id, so a chat that is left and
+  /// reopened still shows already-decrypted text within a single app run.
+  ///
+  /// SECURITY POSTURE — read before touching: plaintext is NEVER written to
+  /// disk; this map lives only in process memory and is cleared on [panicWipe]
+  /// and lost on process death. It DOES mean decrypted text now survives
+  /// backgrounding/foregrounding (a relaxation of the original "nothing
+  /// plaintext survives the next foreground" stance) in exchange for the app
+  /// being usable as a messenger. Stored ratchet ciphertext can never be
+  /// re-decrypted (the Double Ratchet is one-time), so without this cache
+  /// history is permanently unreadable after navigating away. If you need
+  /// history to survive a restart, that requires persisting plaintext in the
+  /// SQLCipher-encrypted DB — a separate, larger disk-posture decision.
+  final Map<String, String> _plaintextCache = <String, String>{};
+
   StreamSubscription<Map<String, dynamic>>? _incomingSub;
   StreamSubscription<RelayConnectionState>? _stateSub;
   bool _wiped = false;
@@ -196,6 +211,12 @@ class MessageService {
   Stream<DecryptedMessage> get decryptedMessages =>
       _decryptedController.stream;
 
+  /// Returns the RAM-cached plaintext for [messageId] decrypted earlier this
+  /// session, or null if it isn't cached (older message, or post-restart —
+  /// the UI then shows the ciphertext placeholder). Disk is never consulted;
+  /// see [_plaintextCache].
+  String? cachedPlaintext(String messageId) => _plaintextCache[messageId];
+
   Future<MessageStatus> sendMessage(
     String recipientId,
     String plaintext,
@@ -237,6 +258,10 @@ class MessageService {
       _log('persist failed :: ${e.runtimeType}');
       return MessageStatus.failed;
     }
+
+    // RAM-only: keep our own sent text readable when the chat is reopened
+    // this session. Keyed by the DB row id so _loadHistory can recover it.
+    _plaintextCache[messageId] = plaintext;
 
     try {
       await _deliver(recipientId, ciphertextB64);
@@ -444,6 +469,10 @@ class MessageService {
     // stored above for later reprocessing, but we emit nothing — there is
     // no plaintext to hand the UI.
     if (plaintext == null) return;
+
+    // RAM-only: keep this decrypted text readable if the chat is reopened
+    // this session (the stored ciphertext can never be re-decrypted).
+    _plaintextCache[messageId] = plaintext;
 
     // TOFU-pin the peer identity key and detect a change. Best-effort: a
     // failure here must NEVER block delivery of an already-decrypted message,
@@ -672,6 +701,7 @@ class MessageService {
 
     _pending.clear();
     _seenMessageIds.clear();
+    _plaintextCache.clear();
     if (!_decryptedController.isClosed) {
       await _decryptedController.close();
     }
