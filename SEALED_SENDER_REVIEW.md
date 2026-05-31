@@ -1,8 +1,10 @@
 # Sealed Sender (sealed-sender-v1) — External Review Package
 
-**Status: AWAITING EXTERNAL CRYPTOGRAPHER REVIEW. Do not wire into the app
-or ship until C2/H1/H2 (below) are resolved and this construction is signed
-off by a reviewer independent of its author.**
+**Status: WIRED and in use for local/dev testing — Sealed Sender is now the
+only wire path (the cleartext dev shim has been removed). C2 is implemented;
+H1/H2 are addressed (see §5b). STILL REQUIRES an external cryptographer to
+sign off on the bespoke construction before it is relied on to protect real
+users.**
 
 This document is the entry point for an external review of Spectre's
 in-house Sealed Sender construction. It is self-contained but points to the
@@ -120,7 +122,7 @@ seal/open math). New items below; "fixed" ones were applied to the core
 ### Biggest takeaways for the reviewer
 1. **NEW-HIGH-1** is the one that most undermines the stated defense: C1 says "trust rests on out-of-band fingerprint verification," but verification is currently decorative (handle-keyed, never enforced, not pinned to key bytes). This needs to be a real, key-pinned gate.
 2. **H3 + H4** are the recommended construction hardening (move public keys into the KDF IKM; add an in-AEAD transcript commitment) — these are design decisions we deliberately did NOT apply unilaterally; they want your sign-off.
-3. The current app already ships relay-trusted `sender_id` (sealed sender unwired), so it has **no** metadata protection today — the integration is what delivers the property, and must carry C2/H1/H2/NEW-HIGH-1/2/3.
+3. ~~The current app ships relay-trusted `sender_id`~~ RESOLVED: sealed sender is now fully wired (send seals, receive opens + C2 binding), the cleartext dev shim is removed, and NEW-HIGH-1 (key-pinning + verify UI) is implemented. The metadata property is delivered; what remains is the external sign-off on the construction itself.
 
 ## 6. Specific questions for the reviewer
 
