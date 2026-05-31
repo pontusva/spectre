@@ -6,6 +6,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/crypto/session_manager.dart';
+import '../../core/models/contact.dart';
 import '../../core/models/message.dart';
 import '../../core/storage/secure_database.dart';
 import '../../services/message_service.dart';
@@ -72,6 +73,8 @@ class _ChatScreenState extends State<ChatScreen> {
   // The real trust anchor: a verified safety number is the only thing that
   // distinguishes the genuine peer from a relay-as-CA MITM on first contact.
   bool _verified = false;
+  // The peer's contact row (for the nickname label); null until loaded / none.
+  Contact? _peerContact;
   _SessionState _sessionState = _SessionState.uninitialized;
 
   String get _truncatedRecipient {
@@ -91,7 +94,10 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _loadVerification() async {
     final contact = await widget.database.getContact(widget.recipientId);
     if (!mounted) return;
-    setState(() => _verified = contact?.isVerified ?? false);
+    setState(() {
+      _verified = contact?.isVerified ?? false;
+      _peerContact = contact;
+    });
   }
 
   /// Opens the peer verification screen, then refreshes the indicator — the
@@ -301,7 +307,7 @@ class _ChatScreenState extends State<ChatScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 14),
             child: Center(
               child: Text(
-                _truncatedRecipient,
+                peerLabel(_peerContact, _truncatedRecipient),
                 style: SpectreTypography.caption().copyWith(
                   color: SpectreColors.textCold,
                   letterSpacing: 1.6,

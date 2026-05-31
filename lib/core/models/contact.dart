@@ -7,6 +7,14 @@
 /// scanning a QR, reading the words aloud in person, or exchanging
 /// them on a separately-trusted channel. Programmatic verification is
 /// explicitly NOT allowed; the boolean is a record of human attestation.
+/// The label to show for a peer: their local nickname if set, otherwise the
+/// caller-supplied fallback (typically the truncated user ID). Pure — unit
+/// tested. [contact] may be null (no contact row yet → fallback).
+String peerLabel(Contact? contact, String fallbackTruncatedId) {
+  final name = contact?.displayName;
+  return (name != null && name.isNotEmpty) ? name : fallbackTruncatedId;
+}
+
 class Contact {
   final String id;
 

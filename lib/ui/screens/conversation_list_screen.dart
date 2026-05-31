@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../core/models/contact.dart';
 import '../../core/models/conversation.dart';
 import '../../core/storage/secure_database.dart';
 import '../../services/message_service.dart';
@@ -35,6 +36,8 @@ class ConversationListScreen extends StatefulWidget {
 class _ConversationListScreenState extends State<ConversationListScreen> {
   final Uuid _uuid = const Uuid();
   List<Conversation> _conversations = <Conversation>[];
+  // userId -> Contact, for resolving nicknames in tiles (one batch query).
+  Map<String, Contact> _contacts = <String, Contact>{};
   bool _loading = true;
   bool _wiping = false;
   StreamSubscription<DecryptedMessage>? _sub;
@@ -56,12 +59,19 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
 
   Future<void> _load() async {
     final convs = await widget.database.getConversations();
+    final contacts = await widget.database.getAllContacts();
     if (!mounted) return;
     setState(() {
       _conversations = convs;
+      _contacts = {for (final c in contacts) c.userId: c};
       _loading = false;
     });
   }
+
+  /// Label for a conversation: the peer's nickname if set, else the truncated
+  /// id (Conversation.displayName).
+  String _labelFor(Conversation c) =>
+      peerLabel(_contacts[c.recipientId], c.displayName);
 
   Future<void> _confirmAndWipe() async {
     final confirmed = await showDialog<bool>(
@@ -124,7 +134,8 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
         borderRadius: BorderRadius.zero,
         side: BorderSide(color: SpectreColors.hairline, width: 1),
       ),
-      builder: (ctx) => _ConversationActionsSheet(conversation: c),
+      builder: (ctx) =>
+          _ConversationActionsSheet(conversation: c, label: _labelFor(c)),
     );
     if (action == null || !mounted) return;
 
@@ -277,6 +288,7 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
         final c = _conversations[idx - 1];
         return _ConversationTile(
           conversation: c,
+          label: _labelFor(c),
           timestampLabel: _formatTimestamp(c.lastMessageAt),
           onTap: () => widget.onOpenConversation(c),
           onLongPress: () => _onLongPress(c),
@@ -317,12 +329,15 @@ class _ListHeader extends StatelessWidget {
 class _ConversationTile extends StatelessWidget {
   const _ConversationTile({
     required this.conversation,
+    required this.label,
     required this.timestampLabel,
     required this.onTap,
     required this.onLongPress,
   });
 
   final Conversation conversation;
+  /// Resolved peer label (nickname if set, else truncated id).
+  final String label;
   final String timestampLabel;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
@@ -357,7 +372,7 @@ class _ConversationTile extends StatelessWidget {
                     children: <Widget>[
                       Expanded(
                         child: Text(
-                          conversation.displayName,
+                          label,
                           style: SpectreTypography.title().copyWith(
                             fontSize: 14,
                             color: hasUnread
@@ -434,9 +449,13 @@ class _UnreadBadge extends StatelessWidget {
 enum _TileAction { archive, delete }
 
 class _ConversationActionsSheet extends StatelessWidget {
-  const _ConversationActionsSheet({required this.conversation});
+  const _ConversationActionsSheet({
+    required this.conversation,
+    required this.label,
+  });
 
   final Conversation conversation;
+  final String label;
 
   @override
   Widget build(BuildContext context) {
@@ -452,7 +471,7 @@ class _ConversationActionsSheet extends StatelessWidget {
               Container(width: 6, height: 6, color: SpectreColors.purpleBright),
               const SizedBox(width: 10),
               Text(
-                conversation.displayName.toUpperCase(),
+                label.toUpperCase(),
                 style: SpectreTypography.title().copyWith(fontSize: 13),
               ),
             ],

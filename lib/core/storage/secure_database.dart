@@ -393,6 +393,20 @@ class SecureDatabase extends _$SecureDatabase {
         .write(ContactsCompanion(isVerified: Value(verified)));
   }
 
+  /// Sets (or clears, with null) the local nickname for a contact. Local-only,
+  /// never sent anywhere. `Value(null)` writes SQL NULL (clears it).
+  Future<int> updateContactDisplayName(String userId, String? displayName) {
+    return (update(contacts)..where((c) => c.userId.equals(userId)))
+        .write(ContactsCompanion(displayName: Value(displayName)));
+  }
+
+  /// All contacts (one query) so the conversation list can resolve nicknames
+  /// without an N+1 of getContact() per row.
+  Future<List<Contact>> getAllContacts() async {
+    final rows = await select(contacts).get();
+    return rows.map(_contactFromRow).toList(growable: false);
+  }
+
   /// Deletes a contact and every conversation linked to that peer in a
   /// single transaction. Messages tied to those conversations are removed
   /// transitively via the FK ON DELETE CASCADE on messages.conversationId.

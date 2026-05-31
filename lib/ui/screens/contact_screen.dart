@@ -105,6 +105,23 @@ class _ContactScreenState extends State<ContactScreen> {
     });
   }
 
+  Future<void> _editNickname() async {
+    final result = await showDialog<String>(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.7),
+      builder: (ctx) => _NicknameDialog(initial: _contact.displayName ?? ''),
+    );
+    if (result == null || !mounted) return; // cancelled
+    final trimmed = result.trim();
+    await widget.services.database
+        .updateContactDisplayName(_contact.userId, trimmed.isEmpty ? null : trimmed);
+    // Re-fetch rather than copyWith: Contact.copyWith uses `?? this.displayName`
+    // and so cannot clear the nickname back to null.
+    final fresh = await widget.services.database.getContact(_contact.userId);
+    if (!mounted || fresh == null) return;
+    setState(() => _contact = fresh);
+  }
+
   Future<void> _reVerify() async {
     if (_busy) return;
     setState(() => _busy = true);
@@ -206,6 +223,11 @@ class _ContactScreenState extends State<ContactScreen> {
                       )
                     else
                       _UnverifiedHeader(contact: _contact),
+                    const SizedBox(height: 16),
+                    _NicknameRow(
+                      displayName: _contact.displayName,
+                      onEdit: _busy ? null : _editNickname,
+                    ),
                     const SizedBox(height: 20),
                     const DashedDivider(),
                     const SizedBox(height: 22),
@@ -897,6 +919,145 @@ class _ActionButton extends StatelessWidget {
           style: SpectreTypography.action().copyWith(
             color: enabled ? textColor : SpectreColors.textDim,
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Read-only row showing the contact's local nickname (or "— none —") with an
+/// [ EDIT ] affordance. Nickname is local-only; see updateContactDisplayName.
+class _NicknameRow extends StatelessWidget {
+  const _NicknameRow({required this.displayName, required this.onEdit});
+
+  final String? displayName;
+  final VoidCallback? onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final has = displayName != null && displayName!.isNotEmpty;
+    return Row(
+      children: <Widget>[
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                'nickname (local only)',
+                style: SpectreTypography.caption().copyWith(
+                  color: SpectreColors.textDim,
+                  letterSpacing: 1.6,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                has ? displayName! : '— none —',
+                style: SpectreTypography.mono().copyWith(
+                  color: has ? SpectreColors.textBright : SpectreColors.textFaint,
+                  fontSize: 13,
+                ),
+              ),
+            ],
+          ),
+        ),
+        InkWell(
+          onTap: onEdit,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Text(
+              '[ EDIT ]',
+              style: SpectreTypography.action().copyWith(
+                color: SpectreColors.purpleBright,
+                fontSize: 11,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Prefilled nickname editor. Pops the new value (empty string = clear) on
+/// SAVE, or null on CANCEL.
+class _NicknameDialog extends StatefulWidget {
+  const _NicknameDialog({required this.initial});
+
+  final String initial;
+
+  @override
+  State<_NicknameDialog> createState() => _NicknameDialogState();
+}
+
+class _NicknameDialogState extends State<_NicknameDialog> {
+  late final TextEditingController _c =
+      TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: SpectreColors.blackLess,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.zero,
+        side: BorderSide(color: SpectreColors.purpleBright, width: 1),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              'SET NICKNAME',
+              style: SpectreTypography.title()
+                  .copyWith(letterSpacing: 3, fontSize: 14),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'local label, stored only on this device. leave empty to clear.',
+              style: SpectreTypography.caption()
+                  .copyWith(color: SpectreColors.textDim, height: 1.6),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _c,
+              autofocus: true,
+              maxLength: 40,
+              cursorColor: SpectreColors.matrixGreen,
+              style: SpectreTypography.mono()
+                  .copyWith(color: SpectreColors.textBright),
+              decoration: const InputDecoration(hintText: 'nickname'),
+              onSubmitted: (v) => Navigator.of(context).pop(v),
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: <Widget>[
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: Text(
+                    'CANCEL',
+                    style: SpectreTypography.action()
+                        .copyWith(color: SpectreColors.textDim),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(_c.text),
+                  child: Text(
+                    'SAVE',
+                    style: SpectreTypography.action()
+                        .copyWith(color: SpectreColors.matrixGreen),
+                  ),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );
