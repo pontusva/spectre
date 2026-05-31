@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/crypto/session_manager.dart';
 import '../../core/models/message.dart';
@@ -67,6 +68,10 @@ class _ChatScreenState extends State<ChatScreen> {
   // and (ideally) re-verifies the fingerprint out of band — never a transient
   // toast they can miss.
   bool _keyChanged = false;
+  // Out-of-band verification state for this peer, read from the contact row.
+  // The real trust anchor: a verified safety number is the only thing that
+  // distinguishes the genuine peer from a relay-as-CA MITM on first contact.
+  bool _verified = false;
   _SessionState _sessionState = _SessionState.uninitialized;
 
   String get _truncatedRecipient {
@@ -79,7 +84,23 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _loadHistory();
+    _loadVerification();
     _sub = widget.messageService.decryptedMessages.listen(_onIncoming);
+  }
+
+  Future<void> _loadVerification() async {
+    final contact = await widget.database.getContact(widget.recipientId);
+    if (!mounted) return;
+    setState(() => _verified = contact?.isVerified ?? false);
+  }
+
+  /// Opens the peer verification screen, then refreshes the indicator — the
+  /// user may have just marked the safety number verified (or a key change
+  /// while away may have reset it).
+  Future<void> _openContact() async {
+    await context.push('/contact/${widget.recipientId}');
+    if (!mounted) return;
+    await _loadVerification();
   }
 
   @override
@@ -116,6 +137,8 @@ class _ChatScreenState extends State<ChatScreen> {
   void _onIncoming(DecryptedMessage dm) {
     if (dm.conversationId != widget.conversationId) return;
     if (!mounted) return;
+    // A key change resets the contact to unverified — reflect it in the bar.
+    if (dm.senderKeyChanged) _loadVerification();
     setState(() {
       if (dm.senderKeyChanged) _keyChanged = true;
       if (_knownIds.add(dm.id)) {
@@ -290,6 +313,7 @@ class _ChatScreenState extends State<ChatScreen> {
           child: Column(
             children: <Widget>[
               const _SessionMetaBar(),
+              _VerificationBar(verified: _verified, onTap: _openContact),
               if (_keyChanged) const _KeyChangedBanner(),
               Expanded(child: _buildList()),
               if (_sessionState == _SessionState.peerNotFound)
@@ -422,6 +446,60 @@ class _KeyChangedBanner extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Tappable out-of-band verification status for the peer. Green when the
+/// safety number has been confirmed; otherwise an attention-drawing prompt to
+/// go compare it. Tapping opens the peer/contact screen. This is what makes
+/// the trust state legible — without it, "verified" is an invisible DB flag.
+class _VerificationBar extends StatelessWidget {
+  const _VerificationBar({required this.verified, required this.onTap});
+
+  final bool verified;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color =
+        verified ? SpectreColors.matrixGreen : SpectreColors.purpleBright;
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+        decoration: const BoxDecoration(
+          color: SpectreColors.blackLess,
+          border: Border(
+            bottom: BorderSide(color: SpectreColors.hairline, width: 1),
+          ),
+        ),
+        child: Row(
+          children: <Widget>[
+            Text(
+              verified ? SpectreIcons.dotFilled : SpectreIcons.warning,
+              style: SpectreTypography.mono().copyWith(color: color, fontSize: 12),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                verified
+                    ? 'identity verified'
+                    : 'unverified — tap to compare safety number',
+                style: SpectreTypography.caption().copyWith(
+                  color: color,
+                  letterSpacing: 1.2,
+                ),
+              ),
+            ),
+            if (!verified)
+              Text('›',
+                  style:
+                      SpectreTypography.mono().copyWith(color: color, fontSize: 14)),
+          ],
+        ),
       ),
     );
   }

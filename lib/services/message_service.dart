@@ -10,6 +10,7 @@ import '../core/crypto/prekey_manager.dart';
 import '../core/crypto/relay_auth_manager.dart';
 import '../core/crypto/sealed_sender.dart';
 import '../core/crypto/session_manager.dart';
+import '../core/models/contact.dart';
 import '../core/models/conversation.dart';
 import '../core/models/message.dart';
 import '../core/storage/secure_database.dart';
@@ -499,7 +500,8 @@ class MessageService {
   ) async {
     final key = await _sessions.remoteIdentityKey(senderId);
     if (key == null) return false; // no session identity to pin yet
-    final currentB64 = base64Encode(key.serialize());
+    final serialized = key.serialize();
+    final currentB64 = base64Encode(serialized);
 
     String stored = '';
     for (final c in await _db.getConversations()) {
@@ -509,23 +511,50 @@ class MessageService {
       }
     }
 
-    switch (decideIdentityPin(stored, currentB64)) {
-      case IdentityPinDecision.pinFirstUse:
-        await _db.updateConversationKey(conversationId, currentB64);
-        return false;
-      case IdentityPinDecision.matched:
-        return false;
-      case IdentityPinDecision.changed:
-        _log(
-          'SECURITY: peer identity key CHANGED for ${_redactId(senderId)} '
-          '— marking unverified, prompting re-verification',
-        );
-        // Best-effort; no-op if no contact row exists for this peer yet.
-        try {
-          await _db.updateContactVerified(senderId, false);
-        } catch (_) {/* contact may not exist */}
-        return true;
+    final decision = decideIdentityPin(stored, currentB64);
+    if (decision == IdentityPinDecision.matched) return false;
+
+    // First use OR a change: (re)pin the conversation key and (re)build the
+    // peer's contact record from the CURRENT key so the fingerprint-
+    // verification UI has the right safety number to compare, always starting
+    // UNVERIFIED. A change is additionally surfaced loudly (return true ->
+    // chat banner): we adopt the new key for message continuity but never
+    // silently — the human must re-verify out of band.
+    await _db.updateConversationKey(conversationId, currentB64);
+    await _upsertPeerContact(senderId, serialized);
+
+    if (decision == IdentityPinDecision.changed) {
+      _log(
+        'SECURITY: peer identity key CHANGED for ${_redactId(senderId)} '
+        '— re-pinned, contact reset to unverified, prompting re-verification',
+      );
+      return true;
     }
+    return false;
+  }
+
+  /// Creates or refreshes the peer's contact record from their identity key,
+  /// resetting it to UNVERIFIED. The fingerprint is SHA-256 over the serialized
+  /// identity public key, hex-encoded — derived identically to the local
+  /// fingerprint in contact_screen, so the two devices' safety numbers line up.
+  /// Reuses the existing row's id (the userId column is UNIQUE) so a change
+  /// updates in place rather than violating the constraint.
+  Future<void> _upsertPeerContact(
+    String userId,
+    Uint8List serializedKey,
+  ) async {
+    final hash = SHA256Digest().process(serializedKey);
+    final fpHex =
+        hash.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    final existing = await _db.getContact(userId);
+    await _db.insertContact(Contact(
+      id: existing?.id ?? _uuid.v4(),
+      userId: userId,
+      identityKeyFingerprint: fpHex,
+      createdAt: existing?.createdAt ?? DateTime.now().toUtc(),
+      displayName: existing?.displayName,
+      isVerified: false,
+    ));
   }
 
   Future<void> _onRelayFrame(Map<String, dynamic> envelope) async {
