@@ -14,6 +14,7 @@ import '../../services/network/relay_service.dart';
 import '../screens/chat_screen.dart';
 import '../screens/contact_screen.dart';
 import '../screens/conversation_list_screen.dart';
+import '../screens/onboarding_screen.dart';
 import '../screens/settings_screen.dart';
 import 'app_theme.dart';
 
@@ -90,7 +91,7 @@ GoRouter buildSpectreRouter({required SpectreServices services}) {
         path: '/onboarding',
         pageBuilder: (ctx, state) => _fadePage(
           key: state.pageKey,
-          child: _OnboardingScreen(
+          child: OnboardingScreen(
             services: _readExtras(state, services).services,
           ),
         ),
@@ -105,8 +106,11 @@ GoRouter buildSpectreRouter({required SpectreServices services}) {
               messageService: svc.messageService!,
               database: svc.database,
               currentUserId: svc.currentUserId!,
-              onOpenConversation: (Conversation c) {
-                ctx.push(
+              // Awaited so the list can reload on return (nickname edits,
+              // accepts/blocks) without depending on the RouteObserver
+              // delivering didPopNext through the intermediate chat route.
+              onOpenConversation: (Conversation c) async {
+                await ctx.push(
                   '/chat/${c.id}',
                   extra: RouteExtras(services: svc, conversation: c),
                 );
@@ -332,120 +336,6 @@ class _RouteErrorScreen extends StatelessWidget {
   }
 }
 
-class _OnboardingScreen extends StatefulWidget {
-  const _OnboardingScreen({required this.services});
-
-  final SpectreServices services;
-
-  @override
-  State<_OnboardingScreen> createState() => _OnboardingScreenState();
-}
-
-class _OnboardingScreenState extends State<_OnboardingScreen> {
-  bool _busy = false;
-  Object? _err;
-
-  Future<void> _initiate() async {
-    if (_busy) return;
-    setState(() {
-      _busy = true;
-      _err = null;
-    });
-    try {
-      await widget.services.identityManager.loadOrCreate();
-      widget.services.onInitiate();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _busy = false;
-        _err = e;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: SpectreColors.blackDeep,
-      body: NoiseBackground(
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 28),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                const SizedBox(height: 80),
-                _SpectreGlyph(),
-                const SizedBox(height: 8),
-                Text(
-                  '─── encrypted relay client ───',
-                  style: SpectreTypography.caption().copyWith(
-                    color: SpectreColors.textDim,
-                    letterSpacing: 3,
-                  ),
-                ),
-                const SizedBox(height: 48),
-                Text(
-                  'no phone numbers.',
-                  style: SpectreTypography.body().copyWith(
-                    color: SpectreColors.textBright,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'no recovery email.',
-                  style: SpectreTypography.body().copyWith(
-                    color: SpectreColors.textBright,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'no central directory.',
-                  style: SpectreTypography.body().copyWith(
-                    color: SpectreColors.textBright,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                const DashedDivider(),
-                const SizedBox(height: 20),
-                Text(
-                  'tapping [ initiate ] will generate a long-term '
-                  'identity key on this device. it is stored in the '
-                  'platform keystore and never transmitted. losing it '
-                  'means losing every session — there is no recovery.',
-                  style: SpectreTypography.caption().copyWith(
-                    color: SpectreColors.textCold,
-                    height: 1.7,
-                    letterSpacing: 0.6,
-                  ),
-                ),
-                const Spacer(),
-                if (_err != null) ...<Widget>[
-                  Text(
-                    '[ fault :: ${_err.runtimeType} ]',
-                    style: SpectreTypography.danger().copyWith(fontSize: 11),
-                  ),
-                  const SizedBox(height: 10),
-                ],
-                _ActionButton(
-                  label: _busy ? '[ generating… ]' : '[ INITIATE ]',
-                  color: _busy
-                      ? SpectreColors.blackHair
-                      : SpectreColors.purpleDeep,
-                  borderColor: SpectreColors.purpleBright,
-                  textColor: SpectreColors.textBright,
-                  onTap: _busy ? null : _initiate,
-                ),
-                const SizedBox(height: 28),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// Resolves the peer's contact row for /contact and hands it to the full
 /// ContactScreen (own + peer safety-number comparison — both halves are
 /// needed: each device shows its OWN fingerprint so the peer can confirm it).
@@ -536,60 +426,5 @@ class _ContactScreenState extends State<_ContactScreen> {
       );
     }
     return ContactScreen(services: widget.services, contact: c);
-  }
-}
-
-class _ActionButton extends StatelessWidget {
-  const _ActionButton({
-    required this.label,
-    required this.color,
-    required this.borderColor,
-    required this.textColor,
-    required this.onTap,
-  });
-
-  final String label;
-  final Color color;
-  final Color borderColor;
-  final Color textColor;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: color,
-          border: Border.all(color: borderColor, width: 1),
-        ),
-        child: Text(
-          label,
-          style: SpectreTypography.action().copyWith(color: textColor),
-        ),
-      ),
-    );
-  }
-}
-
-class _SpectreGlyph extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: <Widget>[
-        Container(width: 10, height: 10, color: SpectreColors.matrixGreen),
-        const SizedBox(width: 12),
-        Text(
-          'SPECTRE',
-          style: SpectreTypography.display().copyWith(
-            fontSize: 28,
-            letterSpacing: 8,
-          ),
-        ),
-      ],
-    );
   }
 }

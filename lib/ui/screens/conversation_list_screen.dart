@@ -25,7 +25,7 @@ class ConversationListScreen extends StatefulWidget {
   final MessageService messageService;
   final SecureDatabase database;
   final String currentUserId;
-  final void Function(Conversation conversation) onOpenConversation;
+  final Future<void> Function(Conversation conversation) onOpenConversation;
   final VoidCallback onOpenSettings;
   final VoidCallback? onWiped;
 
@@ -97,6 +97,14 @@ class _ConversationListScreenState extends State<ConversationListScreen>
   String _labelFor(Conversation c) =>
       peerLabel(_contacts[c.recipientId], c.displayName);
 
+  /// Open a conversation and reload on return. The reload is what makes a
+  /// nickname set on the contact screen (reached via the chat) show up here
+  /// the moment you come back — not only after the peer next messages you.
+  Future<void> _open(Conversation c) async {
+    await widget.onOpenConversation(c);
+    if (mounted) await _load();
+  }
+
   Future<void> _confirmAndWipe() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -156,7 +164,7 @@ class _ConversationListScreenState extends State<ConversationListScreen>
       );
       await widget.database.insertConversation(conversation);
     }
-    widget.onOpenConversation(conversation);
+    await _open(conversation);
   }
 
   Future<void> _onLongPress(Conversation c) async {
@@ -351,7 +359,7 @@ class _ConversationListScreenState extends State<ConversationListScreen>
           label: _labelFor(c),
           timestampLabel: _formatTimestamp(c.lastMessageAt),
           // Tap to read the request; long-press to accept / block.
-          onTap: () => widget.onOpenConversation(c),
+          onTap: () => _open(c),
           onLongPress: () => _onRequest(c),
         ));
       }
@@ -362,7 +370,7 @@ class _ConversationListScreenState extends State<ConversationListScreen>
         conversation: c,
         label: _labelFor(c),
         timestampLabel: _formatTimestamp(c.lastMessageAt),
-        onTap: () => widget.onOpenConversation(c),
+        onTap: () => _open(c),
         onLongPress: () => _onLongPress(c),
       ));
     }
