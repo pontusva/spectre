@@ -12,22 +12,28 @@ class SpectreColors {
   static const Color blackHair = Color(0xFF1A1A1A);
 
   static const Color purpleDeep = Color(0xFF2D0A3E);
-  static const Color purpleBright = Color(0xFF6B00A8);
+  // Brightened so it's legible as link/label TEXT on near-black (the old
+  // 0xFF6B00A8 was ~2:1). Still the accent for borders/squares.
+  static const Color purpleBright = Color(0xFFA95EEA);
   static const Color purpleHair = Color(0xFF1F0530);
 
   static const Color redBlood = Color(0xFF8B0000);
-  static const Color redDanger = Color(0xFFCC0000);
+  static const Color redDanger = Color(0xFFE23B3B);
   static const Color redDecay = Color(0xFFAA1A1A);
 
-  static const Color textCold = Color(0xFFA0A0A0);
-  static const Color textBright = Color(0xFFCCCCCC);
-  static const Color textDim = Color(0xFF666666);
-  static const Color textFaint = Color(0xFF3D3D3D);
+  // Text tiers, tuned for readability on the near-black backgrounds (≈AA for
+  // body/helper text). Hierarchy preserved bright > cold > dim > faint; the
+  // old dim/faint (0x66/0x3D) were ~3:1 and ~1.7:1 — unreadable for helpers.
+  static const Color textBright = Color(0xFFECECEC);
+  static const Color textCold = Color(0xFFC2C2C2);
+  static const Color textDim = Color(0xFF9C9C9C);
+  static const Color textFaint = Color(0xFF7C7C7C);
 
   static const Color matrixGreen = Color(0xFF00FF41);
-  static const Color matrixDim = Color(0xFF008820);
+  static const Color matrixDim = Color(0xFF1FC03A);
 
-  static const Color hairline = Color(0xFF1F1F1F);
+  // Slightly lighter so separators are actually visible on black.
+  static const Color hairline = Color(0xFF2E2E2E);
 }
 
 class SpectreTypography {
@@ -223,7 +229,7 @@ class AppTheme {
       ),
       textSelectionTheme: const TextSelectionThemeData(
         cursorColor: SpectreColors.purpleBright,
-        selectionColor: Color(0x556B00A8),
+        selectionColor: Color(0x55A95EEA),
         selectionHandleColor: SpectreColors.purpleBright,
       ),
       dialogTheme: DialogThemeData(

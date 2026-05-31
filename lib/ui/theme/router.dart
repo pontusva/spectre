@@ -62,10 +62,18 @@ class RouteExtras {
   final Contact? contact;
 }
 
+/// Observes route push/pop so screens can refresh when returned to (e.g. the
+/// conversation list re-reads nicknames/requests after you pop back from a
+/// chat or the contact screen). Subscribe via [RouteAware] in a screen's
+/// didChangeDependencies.
+final RouteObserver<PageRoute<dynamic>> spectreRouteObserver =
+    RouteObserver<PageRoute<dynamic>>();
+
 GoRouter buildSpectreRouter({required SpectreServices services}) {
   final initialExtras = RouteExtras(services: services);
 
   return GoRouter(
+    observers: <NavigatorObserver>[spectreRouteObserver],
     initialLocation: services.hasIdentity ? '/conversations' : '/onboarding',
     initialExtra: initialExtras,
     debugLogDiagnostics: false,

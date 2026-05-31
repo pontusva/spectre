@@ -9,6 +9,7 @@ import '../../core/models/conversation.dart';
 import '../../core/storage/secure_database.dart';
 import '../../services/message_service.dart';
 import '../theme/app_theme.dart';
+import '../theme/router.dart';
 
 class ConversationListScreen extends StatefulWidget {
   const ConversationListScreen({
@@ -33,7 +34,8 @@ class ConversationListScreen extends StatefulWidget {
       _ConversationListScreenState();
 }
 
-class _ConversationListScreenState extends State<ConversationListScreen> {
+class _ConversationListScreenState extends State<ConversationListScreen>
+    with RouteAware {
   final Uuid _uuid = const Uuid();
   List<Conversation> _conversations = <Conversation>[];
   // Pending message-requests (inbound from peers not yet accepted).
@@ -54,7 +56,25 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute) {
+      spectreRouteObserver.subscribe(this, route);
+    }
+  }
+
+  @override
+  void didPopNext() {
+    // Returned to the list (a chat/contact screen popped). Reload so nickname
+    // edits, accepts/blocks, and new requests show without waiting for an
+    // incoming message.
+    _load();
+  }
+
+  @override
   void dispose() {
+    spectreRouteObserver.unsubscribe(this);
     _sub?.cancel();
     super.dispose();
   }
