@@ -12,6 +12,7 @@ import '../../services/message_service.dart';
 import '../../services/network/prekey_service.dart';
 import '../../services/network/relay_service.dart';
 import '../screens/chat_screen.dart';
+import '../screens/contact_screen.dart';
 import '../screens/conversation_list_screen.dart';
 import '../screens/settings_screen.dart';
 import 'app_theme.dart';
@@ -437,6 +438,10 @@ class _OnboardingScreenState extends State<_OnboardingScreen> {
   }
 }
 
+/// Resolves the peer's contact row for /contact and hands it to the full
+/// ContactScreen (own + peer safety-number comparison — both halves are
+/// needed: each device shows its OWN fingerprint so the peer can confirm it).
+/// Shows a placeholder until the first message creates the record.
 class _ContactScreen extends StatefulWidget {
   const _ContactScreen({
     required this.services,
@@ -476,190 +481,53 @@ class _ContactScreenState extends State<_ContactScreen> {
     });
   }
 
-  Future<void> _toggleVerified() async {
-    final c = _contact;
-    if (c == null) return;
-    final updated = c.copyWith(isVerified: !c.isVerified);
-    await widget.services.database
-        .updateContactVerified(c.userId, updated.isVerified);
-    if (!mounted) return;
-    setState(() => _contact = updated);
-  }
-
-  String _truncate(String s, int n) =>
-      s.length <= n ? s : '${s.substring(0, n)}…';
-
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: SpectreColors.blackDeep,
-      appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, size: 20),
-          onPressed: () => Navigator.of(context).maybePop(),
-        ),
-        title: Text(
-          'PEER',
-          style: SpectreTypography.title().copyWith(letterSpacing: 4),
-        ),
-      ),
-      body: NoiseBackground(
-        child: _loading
-            ? const _RouteLoadingScreen(label: '[ loading peer… ]')
-            : _buildBody(),
-      ),
-    );
-  }
-
-  Widget _buildBody() {
+    if (_loading) {
+      return const _RouteLoadingScreen(label: '[ loading peer… ]');
+    }
     final c = _contact;
     if (c == null) {
-      return Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text('> userId', style: SpectreTypography.caption()),
-            const SizedBox(height: 6),
-            SelectableText(
-              widget.userId,
-              style: SpectreTypography.mono().copyWith(
-                color: SpectreColors.textBright,
-              ),
+      return Scaffold(
+        backgroundColor: SpectreColors.blackDeep,
+        appBar: AppBar(
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back, size: 20),
+            onPressed: () => Navigator.of(context).maybePop(),
+          ),
+          title: Text('PEER',
+              style: SpectreTypography.title().copyWith(letterSpacing: 4)),
+        ),
+        body: NoiseBackground(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const SizedBox(height: 40),
+                Text('> userId', style: SpectreTypography.caption()),
+                const SizedBox(height: 6),
+                SelectableText(widget.userId,
+                    style: SpectreTypography.mono()
+                        .copyWith(color: SpectreColors.textBright)),
+                const SizedBox(height: 22),
+                const DashedDivider(),
+                const SizedBox(height: 22),
+                Text('no contact record yet.',
+                    style: SpectreTypography.body()),
+                const SizedBox(height: 4),
+                Text(
+                  'a record is created the first time you exchange a message '
+                  'with this peer.',
+                  style: SpectreTypography.caption().copyWith(height: 1.7),
+                ),
+              ],
             ),
-            const SizedBox(height: 22),
-            const DashedDivider(),
-            const SizedBox(height: 22),
-            Text(
-              'no contact record yet.',
-              style: SpectreTypography.body(),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'a record is created the first time you receive a message '
-              'from this peer.',
-              style: SpectreTypography.caption().copyWith(height: 1.7),
-            ),
-          ],
+          ),
         ),
       );
     }
-
-    final words = c.fingerprintWords;
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Text('> userId', style: SpectreTypography.caption()),
-          const SizedBox(height: 6),
-          SelectableText(
-            _truncate(c.userId, 24),
-            style: SpectreTypography.mono().copyWith(
-              color: SpectreColors.textBright,
-              fontSize: 14,
-            ),
-          ),
-          if (c.displayName != null) ...<Widget>[
-            const SizedBox(height: 22),
-            Text('> alias', style: SpectreTypography.caption()),
-            const SizedBox(height: 6),
-            Text(
-              c.displayName!,
-              style: SpectreTypography.mono().copyWith(
-                color: SpectreColors.textCold,
-              ),
-            ),
-          ],
-          const SizedBox(height: 22),
-          const DashedDivider(),
-          const SizedBox(height: 22),
-          Row(
-            children: <Widget>[
-              Container(
-                width: 6,
-                height: 6,
-                color: c.isVerified
-                    ? SpectreColors.matrixGreen
-                    : SpectreColors.redDanger,
-              ),
-              const SizedBox(width: 8),
-              Text(
-                c.isVerified ? 'verified out-of-band' : 'unverified',
-                style: SpectreTypography.caption().copyWith(
-                  color: c.isVerified
-                      ? SpectreColors.matrixGreen
-                      : SpectreColors.redDanger,
-                  letterSpacing: 2,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Text(
-            'compare these words with your peer on a separately-trusted '
-            'channel (in person, signed audio, scanned qr). matching means '
-            'no MITM. mismatch means abandon this session.',
-            style: SpectreTypography.caption().copyWith(height: 1.7),
-          ),
-          const SizedBox(height: 18),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              for (var i = 0; i < words.length; i++)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 6,
-                  ),
-                  decoration: const BoxDecoration(
-                    color: SpectreColors.blackLess,
-                    border: Border.fromBorderSide(
-                      BorderSide(color: SpectreColors.hairline, width: 1),
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      Text(
-                        '${(i + 1).toString().padLeft(2, '0')}',
-                        style: SpectreTypography.stamp().copyWith(
-                          color: SpectreColors.textFaint,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        words[i],
-                        style: SpectreTypography.mono().copyWith(
-                          color: SpectreColors.textBright,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 26),
-          _ActionButton(
-            label:
-                c.isVerified ? '[ MARK UNVERIFIED ]' : '[ MARK AS VERIFIED ]',
-            color: c.isVerified
-                ? SpectreColors.blackHair
-                : SpectreColors.purpleDeep,
-            borderColor: c.isVerified
-                ? SpectreColors.hairline
-                : SpectreColors.purpleBright,
-            textColor: c.isVerified
-                ? SpectreColors.textDim
-                : SpectreColors.textBright,
-            onTap: _toggleVerified,
-          ),
-        ],
-      ),
-    );
+    return ContactScreen(services: widget.services, contact: c);
   }
 }
 
