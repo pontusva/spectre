@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/crypto/identity_manager.dart';
@@ -14,6 +13,7 @@ import '../../services/network/prekey_service.dart';
 import '../../services/network/relay_service.dart';
 import '../screens/chat_screen.dart';
 import '../screens/conversation_list_screen.dart';
+import '../screens/settings_screen.dart';
 import 'app_theme.dart';
 
 class SpectreServices {
@@ -145,7 +145,7 @@ GoRouter buildSpectreRouter({required SpectreServices services}) {
         path: '/settings',
         pageBuilder: (ctx, state) => _fadePage(
           key: state.pageKey,
-          child: _SettingsScreen(
+          child: SettingsScreen(
             services: _readExtras(state, services).services,
           ),
         ),
@@ -656,189 +656,6 @@ class _ContactScreenState extends State<_ContactScreen> {
                 ? SpectreColors.textDim
                 : SpectreColors.textBright,
             onTap: _toggleVerified,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SettingsScreen extends StatelessWidget {
-  const _SettingsScreen({required this.services});
-
-  final SpectreServices services;
-
-  String _truncate(String s, int n) =>
-      s.length <= n ? s : '${s.substring(0, n)}…';
-
-  // Copy the FULL user id (not the truncated display value) to the clipboard.
-  // Capture the messenger before the await so we don't touch a possibly-gone
-  // BuildContext afterwards.
-  Future<void> _copyId(BuildContext context) async {
-    final id = services.currentUserId;
-    if (id == null) return;
-    final messenger = ScaffoldMessenger.of(context);
-    await Clipboard.setData(ClipboardData(text: id));
-    messenger.showSnackBar(
-      const SnackBar(
-        content: Text('identity copied to clipboard'),
-        duration: Duration(seconds: 2),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hasId = services.currentUserId != null;
-    return Scaffold(
-      backgroundColor: SpectreColors.blackDeep,
-      appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, size: 20),
-          onPressed: () => Navigator.of(context).maybePop(),
-        ),
-        title: Text(
-          'CONFIG',
-          style: SpectreTypography.title().copyWith(letterSpacing: 4),
-        ),
-      ),
-      body: NoiseBackground(
-        child: ListView(
-          children: <Widget>[
-            _SettingsTile(
-              label: 'identity',
-              value: hasId ? _truncate(services.currentUserId!, 24) : '——',
-              actionLabel: hasId ? '[ copy ]' : null,
-              onAction: hasId ? () => _copyId(context) : null,
-            ),
-            _SettingsTile(
-              label: 'relay',
-              value: services.relayUrl?.toString() ?? '——',
-            ),
-            _SettingsTile(
-              label: 'sealed sender',
-              value: 'enabled',
-              valueColor: SpectreColors.matrixGreen,
-            ),
-            _SettingsTile(
-              label: 'analytics / crash reports',
-              value: 'disabled',
-              valueColor: SpectreColors.matrixGreen,
-            ),
-            _SettingsTile(
-              label: 'forward secrecy',
-              value: 'double-ratchet active',
-              valueColor: SpectreColors.matrixGreen,
-            ),
-            const HairlineDivider(),
-            const SizedBox(height: 24),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Text(
-                'DANGER',
-                style: SpectreTypography.danger().copyWith(letterSpacing: 4),
-              ),
-            ),
-            const SizedBox(height: 6),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: const DashedDivider(color: SpectreColors.redDanger),
-            ),
-            const SizedBox(height: 16),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: _ActionButton(
-                label: '[ PANIC WIPE ]',
-                color: SpectreColors.redBlood,
-                borderColor: SpectreColors.redDanger,
-                textColor: SpectreColors.textBright,
-                onTap: () async {
-                  final svc = services.messageService;
-                  if (svc == null) return;
-                  await svc.panicWipe();
-                  services.onWiped();
-                },
-              ),
-            ),
-            const SizedBox(height: 30),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SettingsTile extends StatelessWidget {
-  const _SettingsTile({
-    required this.label,
-    required this.value,
-    this.valueColor,
-    this.actionLabel,
-    this.onAction,
-  });
-
-  final String label;
-  final String value;
-  final Color? valueColor;
-  // Optional trailing tappable action (e.g. '[ copy ]'). Both must be set.
-  final String? actionLabel;
-  final VoidCallback? onAction;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-      decoration: const BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: SpectreColors.hairline, width: 1),
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Expanded(
-            flex: 4,
-            child: Text(
-              label,
-              style: SpectreTypography.caption().copyWith(
-                color: SpectreColors.textDim,
-                letterSpacing: 2,
-              ),
-            ),
-          ),
-          Expanded(
-            flex: 6,
-            child: Row(
-              children: <Widget>[
-                Expanded(
-                  child: SelectableText(
-                    value,
-                    style: SpectreTypography.mono().copyWith(
-                      color: valueColor ?? SpectreColors.textBright,
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
-                if (actionLabel != null && onAction != null) ...<Widget>[
-                  const SizedBox(width: 8),
-                  InkWell(
-                    onTap: onAction,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
-                      child: Text(
-                        actionLabel!,
-                        style: SpectreTypography.caption().copyWith(
-                          color: SpectreColors.matrixGreen,
-                          letterSpacing: 1.5,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
           ),
         ],
       ),
