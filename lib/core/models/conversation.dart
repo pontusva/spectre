@@ -1,6 +1,30 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+/// Message-request state of a conversation (one-sided / Signal-style):
+///   * [accepted] — in the main Chats list. A conversation I start, or a
+///     request I've accepted.
+///   * [pending]  — an inbound from a peer I haven't accepted; shown in the
+///     Requests inbox, not Chats.
+///   * [blocked]  — hidden everywhere; inbound from this peer is dropped. The
+///     row is KEPT (it is the blocklist); never deleted.
+/// Stored as the enum index in `conversations.requestState` (default 0).
+enum ConversationRequestState { accepted, pending, blocked }
+
+/// Pure transition for an OUTBOUND message to [current]: replying to a pending
+/// request accepts it; accepted stays accepted; a blocked peer is never
+/// silently un-blocked. Unit-tested.
+ConversationRequestState nextStateOnOutbound(ConversationRequestState current) {
+  return current == ConversationRequestState.pending
+      ? ConversationRequestState.accepted
+      : current;
+}
+
+/// Pure inbound gate: drop iff the existing conversation is blocked. A missing
+/// row ([existing] null) is never blocked. Unit-tested.
+bool shouldDropInbound(ConversationRequestState? existing) =>
+    existing == ConversationRequestState.blocked;
+
 /// A 1:1 conversation with a single peer.
 ///
 /// Notes on key pinning:
@@ -35,6 +59,10 @@ class Conversation {
   /// sync with reality" bug class. Defaults to 0 when not provided.
   final int unreadCount;
 
+  /// Message-request state. Defaults to accepted (a conversation I create, or a
+  /// legacy row, is never a request).
+  final ConversationRequestState requestState;
+
   const Conversation({
     required this.id,
     required this.recipientId,
@@ -42,6 +70,7 @@ class Conversation {
     this.lastMessageAt,
     this.isArchived = false,
     this.unreadCount = 0,
+    this.requestState = ConversationRequestState.accepted,
   });
 
   /// Safe display label for the conversation.
@@ -97,7 +126,17 @@ class Conversation {
           : DateTime.fromMillisecondsSinceEpoch(lastMsMs, isUtc: true),
       isArchived: (map['is_archived'] as int) != 0,
       unreadCount: unreadCount,
+      requestState: _requestStateFromIndex(map['request_state'] as int?),
     );
+  }
+
+  static ConversationRequestState _requestStateFromIndex(int? idx) {
+    if (idx == null ||
+        idx < 0 ||
+        idx >= ConversationRequestState.values.length) {
+      return ConversationRequestState.accepted;
+    }
+    return ConversationRequestState.values[idx];
   }
 
   Map<String, Object?> toMap() {
@@ -108,6 +147,7 @@ class Conversation {
       'recipient_public_key': base64Decode(recipientPublicKey),
       'last_message_at': lastMessageAt?.toUtc().millisecondsSinceEpoch ?? 0,
       'is_archived': isArchived ? 1 : 0,
+      'request_state': requestState.index,
       // unreadCount is intentionally not persisted — see field doc.
     };
   }
@@ -116,6 +156,7 @@ class Conversation {
     DateTime? lastMessageAt,
     bool? isArchived,
     int? unreadCount,
+    ConversationRequestState? requestState,
   }) {
     return Conversation(
       id: id,
@@ -124,6 +165,7 @@ class Conversation {
       lastMessageAt: lastMessageAt ?? this.lastMessageAt,
       isArchived: isArchived ?? this.isArchived,
       unreadCount: unreadCount ?? this.unreadCount,
+      requestState: requestState ?? this.requestState,
     );
   }
 }

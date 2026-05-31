@@ -79,6 +79,18 @@ class $ConversationsTable extends Conversations
     requiredDuringInsert: false,
     defaultValue: const Constant(0),
   );
+  static const VerificationMeta _requestStateMeta = const VerificationMeta(
+    'requestState',
+  );
+  @override
+  late final GeneratedColumn<int> requestState = GeneratedColumn<int>(
+    'request_state',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -87,6 +99,7 @@ class $ConversationsTable extends Conversations
     lastMessageAt,
     isArchived,
     unreadCount,
+    requestState,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -151,6 +164,15 @@ class $ConversationsTable extends Conversations
         ),
       );
     }
+    if (data.containsKey('request_state')) {
+      context.handle(
+        _requestStateMeta,
+        requestState.isAcceptableOrUnknown(
+          data['request_state']!,
+          _requestStateMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -184,6 +206,10 @@ class $ConversationsTable extends Conversations
         DriftSqlType.int,
         data['${effectivePrefix}unread_count'],
       )!,
+      requestState: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}request_state'],
+      )!,
     );
   }
 
@@ -200,6 +226,7 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
   final int? lastMessageAt;
   final bool isArchived;
   final int unreadCount;
+  final int requestState;
   const ConversationRow({
     required this.id,
     required this.recipientId,
@@ -207,6 +234,7 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
     this.lastMessageAt,
     required this.isArchived,
     required this.unreadCount,
+    required this.requestState,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -219,6 +247,7 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
     }
     map['is_archived'] = Variable<bool>(isArchived);
     map['unread_count'] = Variable<int>(unreadCount);
+    map['request_state'] = Variable<int>(requestState);
     return map;
   }
 
@@ -232,6 +261,7 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
           : Value(lastMessageAt),
       isArchived: Value(isArchived),
       unreadCount: Value(unreadCount),
+      requestState: Value(requestState),
     );
   }
 
@@ -249,6 +279,7 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
       lastMessageAt: serializer.fromJson<int?>(json['lastMessageAt']),
       isArchived: serializer.fromJson<bool>(json['isArchived']),
       unreadCount: serializer.fromJson<int>(json['unreadCount']),
+      requestState: serializer.fromJson<int>(json['requestState']),
     );
   }
   @override
@@ -261,6 +292,7 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
       'lastMessageAt': serializer.toJson<int?>(lastMessageAt),
       'isArchived': serializer.toJson<bool>(isArchived),
       'unreadCount': serializer.toJson<int>(unreadCount),
+      'requestState': serializer.toJson<int>(requestState),
     };
   }
 
@@ -271,6 +303,7 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
     Value<int?> lastMessageAt = const Value.absent(),
     bool? isArchived,
     int? unreadCount,
+    int? requestState,
   }) => ConversationRow(
     id: id ?? this.id,
     recipientId: recipientId ?? this.recipientId,
@@ -280,6 +313,7 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
         : this.lastMessageAt,
     isArchived: isArchived ?? this.isArchived,
     unreadCount: unreadCount ?? this.unreadCount,
+    requestState: requestState ?? this.requestState,
   );
   ConversationRow copyWithCompanion(ConversationsCompanion data) {
     return ConversationRow(
@@ -299,6 +333,9 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
       unreadCount: data.unreadCount.present
           ? data.unreadCount.value
           : this.unreadCount,
+      requestState: data.requestState.present
+          ? data.requestState.value
+          : this.requestState,
     );
   }
 
@@ -310,7 +347,8 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
           ..write('recipientPublicKey: $recipientPublicKey, ')
           ..write('lastMessageAt: $lastMessageAt, ')
           ..write('isArchived: $isArchived, ')
-          ..write('unreadCount: $unreadCount')
+          ..write('unreadCount: $unreadCount, ')
+          ..write('requestState: $requestState')
           ..write(')'))
         .toString();
   }
@@ -323,6 +361,7 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
     lastMessageAt,
     isArchived,
     unreadCount,
+    requestState,
   );
   @override
   bool operator ==(Object other) =>
@@ -336,7 +375,8 @@ class ConversationRow extends DataClass implements Insertable<ConversationRow> {
           ) &&
           other.lastMessageAt == this.lastMessageAt &&
           other.isArchived == this.isArchived &&
-          other.unreadCount == this.unreadCount);
+          other.unreadCount == this.unreadCount &&
+          other.requestState == this.requestState);
 }
 
 class ConversationsCompanion extends UpdateCompanion<ConversationRow> {
@@ -346,6 +386,7 @@ class ConversationsCompanion extends UpdateCompanion<ConversationRow> {
   final Value<int?> lastMessageAt;
   final Value<bool> isArchived;
   final Value<int> unreadCount;
+  final Value<int> requestState;
   final Value<int> rowid;
   const ConversationsCompanion({
     this.id = const Value.absent(),
@@ -354,6 +395,7 @@ class ConversationsCompanion extends UpdateCompanion<ConversationRow> {
     this.lastMessageAt = const Value.absent(),
     this.isArchived = const Value.absent(),
     this.unreadCount = const Value.absent(),
+    this.requestState = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   ConversationsCompanion.insert({
@@ -363,6 +405,7 @@ class ConversationsCompanion extends UpdateCompanion<ConversationRow> {
     this.lastMessageAt = const Value.absent(),
     this.isArchived = const Value.absent(),
     this.unreadCount = const Value.absent(),
+    this.requestState = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        recipientId = Value(recipientId),
@@ -374,6 +417,7 @@ class ConversationsCompanion extends UpdateCompanion<ConversationRow> {
     Expression<int>? lastMessageAt,
     Expression<bool>? isArchived,
     Expression<int>? unreadCount,
+    Expression<int>? requestState,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -384,6 +428,7 @@ class ConversationsCompanion extends UpdateCompanion<ConversationRow> {
       if (lastMessageAt != null) 'last_message_at': lastMessageAt,
       if (isArchived != null) 'is_archived': isArchived,
       if (unreadCount != null) 'unread_count': unreadCount,
+      if (requestState != null) 'request_state': requestState,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -395,6 +440,7 @@ class ConversationsCompanion extends UpdateCompanion<ConversationRow> {
     Value<int?>? lastMessageAt,
     Value<bool>? isArchived,
     Value<int>? unreadCount,
+    Value<int>? requestState,
     Value<int>? rowid,
   }) {
     return ConversationsCompanion(
@@ -404,6 +450,7 @@ class ConversationsCompanion extends UpdateCompanion<ConversationRow> {
       lastMessageAt: lastMessageAt ?? this.lastMessageAt,
       isArchived: isArchived ?? this.isArchived,
       unreadCount: unreadCount ?? this.unreadCount,
+      requestState: requestState ?? this.requestState,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -431,6 +478,9 @@ class ConversationsCompanion extends UpdateCompanion<ConversationRow> {
     if (unreadCount.present) {
       map['unread_count'] = Variable<int>(unreadCount.value);
     }
+    if (requestState.present) {
+      map['request_state'] = Variable<int>(requestState.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -446,6 +496,7 @@ class ConversationsCompanion extends UpdateCompanion<ConversationRow> {
           ..write('lastMessageAt: $lastMessageAt, ')
           ..write('isArchived: $isArchived, ')
           ..write('unreadCount: $unreadCount, ')
+          ..write('requestState: $requestState, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1495,6 +1546,7 @@ typedef $$ConversationsTableCreateCompanionBuilder =
       Value<int?> lastMessageAt,
       Value<bool> isArchived,
       Value<int> unreadCount,
+      Value<int> requestState,
       Value<int> rowid,
     });
 typedef $$ConversationsTableUpdateCompanionBuilder =
@@ -1505,6 +1557,7 @@ typedef $$ConversationsTableUpdateCompanionBuilder =
       Value<int?> lastMessageAt,
       Value<bool> isArchived,
       Value<int> unreadCount,
+      Value<int> requestState,
       Value<int> rowid,
     });
 
@@ -1578,6 +1631,11 @@ class $$ConversationsTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<int> get requestState => $composableBuilder(
+    column: $table.requestState,
+    builder: (column) => ColumnFilters(column),
+  );
+
   Expression<bool> messagesRefs(
     Expression<bool> Function($$MessagesTableFilterComposer f) f,
   ) {
@@ -1642,6 +1700,11 @@ class $$ConversationsTableOrderingComposer
     column: $table.unreadCount,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<int> get requestState => $composableBuilder(
+    column: $table.requestState,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$ConversationsTableAnnotationComposer
@@ -1678,6 +1741,11 @@ class $$ConversationsTableAnnotationComposer
 
   GeneratedColumn<int> get unreadCount => $composableBuilder(
     column: $table.unreadCount,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get requestState => $composableBuilder(
+    column: $table.requestState,
     builder: (column) => column,
   );
 
@@ -1743,6 +1811,7 @@ class $$ConversationsTableTableManager
                 Value<int?> lastMessageAt = const Value.absent(),
                 Value<bool> isArchived = const Value.absent(),
                 Value<int> unreadCount = const Value.absent(),
+                Value<int> requestState = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ConversationsCompanion(
                 id: id,
@@ -1751,6 +1820,7 @@ class $$ConversationsTableTableManager
                 lastMessageAt: lastMessageAt,
                 isArchived: isArchived,
                 unreadCount: unreadCount,
+                requestState: requestState,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -1761,6 +1831,7 @@ class $$ConversationsTableTableManager
                 Value<int?> lastMessageAt = const Value.absent(),
                 Value<bool> isArchived = const Value.absent(),
                 Value<int> unreadCount = const Value.absent(),
+                Value<int> requestState = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ConversationsCompanion.insert(
                 id: id,
@@ -1769,6 +1840,7 @@ class $$ConversationsTableTableManager
                 lastMessageAt: lastMessageAt,
                 isArchived: isArchived,
                 unreadCount: unreadCount,
+                requestState: requestState,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

@@ -215,7 +215,8 @@ class MessageService {
 
     final messageId = _uuid.v4();
     final identity = await _identity.loadOrCreate();
-    final conversationId = await _ensureConversation(recipientId);
+    final conversationId =
+        await _ensureConversation(recipientId, incoming: false);
     final now = DateTime.now().toUtc();
 
     // The local DB always stores the inner ratchet ciphertext, never the wire
@@ -388,7 +389,20 @@ class MessageService {
       return;
     }
 
-    final conversationId = await _ensureConversation(senderId);
+    // Block gate (one-sided requests): a blocked peer's inbound is dropped
+    // fully — no conversation/contact touch, no decrypt, no key-pin, no emit.
+    // Block keeps the row (it IS the blocklist), so this stays effective
+    // across restarts; deleting it would let the next message re-create a
+    // fresh pending request.
+    final existingConv = await _db.getConversationByRecipient(senderId);
+    if (shouldDropInbound(existingConv?.requestState)) {
+      _log('dropped inbound from blocked peer ${_redactId(senderId)}');
+      return;
+    }
+
+    // incoming:true → a brand-new peer lands in the Requests inbox (pending),
+    // not the main Chats list.
+    final conversationId = await _ensureConversation(senderId, incoming: true);
 
     final timestamp =
         DateTime.fromMillisecondsSinceEpoch(timestampMs, isUtc: true);
@@ -508,13 +522,12 @@ class MessageService {
     final serialized = key.serialize();
     final currentB64 = base64Encode(serialized);
 
-    String stored = '';
-    for (final c in await _db.getConversations()) {
-      if (c.id == conversationId) {
-        stored = c.recipientPublicKey;
-        break;
-      }
-    }
+    // State-agnostic lookup: getConversations() now excludes pending/blocked,
+    // so scanning it would read stored='' for a pending peer and mask every
+    // key change (MITM-detection canary). Read the row by recipient regardless
+    // of request state.
+    final conv = await _db.getConversationByRecipient(senderId);
+    final stored = conv?.recipientPublicKey ?? '';
 
     final decision = decideIdentityPin(stored, currentB64);
     if (decision == IdentityPinDecision.matched) return false;
@@ -592,23 +605,38 @@ class MessageService {
     }
   }
 
-  Future<String> _ensureConversation(String peerId) async {
-    // The listed SecureDatabase API exposes only getConversations() for
-    // reads, so we filter client-side. Conversation lists are bounded by
-    // the number of peers a user actually talks to — typically tens, not
-    // thousands — so the linear scan is acceptable.
-    final all = await _db.getConversations();
-    for (final c in all) {
-      if (c.recipientId == peerId) return c.id;
+  /// Returns the conversation id for [peerId], creating the row if needed.
+  /// [incoming] = is this peer reaching out to us (vs. us initiating)?
+  ///   * New row: `incoming` → pending (Requests inbox); else accepted (Chats).
+  ///   * Existing row + we're sending (`!incoming`): replying to a pending
+  ///     request accepts it ([nextStateOnOutbound]); accepted/blocked unchanged
+  ///     (an outbound never silently un-blocks).
+  /// Uses the state-agnostic lookup so pending/blocked rows are found (the
+  /// UNIQUE recipientId constraint would otherwise be violated by a duplicate).
+  Future<String> _ensureConversation(
+    String peerId, {
+    required bool incoming,
+  }) async {
+    final existing = await _db.getConversationByRecipient(peerId);
+    if (existing != null) {
+      if (!incoming) {
+        final next = nextStateOnOutbound(existing.requestState);
+        if (next != existing.requestState) {
+          await _db.updateConversationState(existing.id, next);
+        }
+      }
+      return existing.id;
     }
     final id = _uuid.v4();
     await _db.insertConversation(Conversation(
       id: id,
       recipientId: peerId,
-      // Placeholder; the real identity key is pinned by the session
-      // init flow.
+      // Placeholder; the real identity key is pinned by the session init flow.
       recipientPublicKey: '',
       lastMessageAt: DateTime.now().toUtc(),
+      requestState: incoming
+          ? ConversationRequestState.pending
+          : ConversationRequestState.accepted,
     ));
     return id;
   }

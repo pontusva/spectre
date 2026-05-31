@@ -96,6 +96,13 @@ class Conversations extends Table {
   IntColumn get unreadCount =>
       integer().withDefault(const Constant(0))();
 
+  // Message-request state: 0=accepted (in Chats), 1=pending (in Requests),
+  // 2=blocked (hidden, inbound dropped). Default 0 so a conversation I start
+  // — and every pre-migration row — is accepted, never a request. Maps to
+  // ConversationRequestState (conversation.dart).
+  IntColumn get requestState =>
+      integer().withDefault(const Constant(0))();
+
   @override
   Set<Column> get primaryKey => {id};
 }
@@ -202,7 +209,7 @@ class SecureDatabase extends _$SecureDatabase {
   File? _dbFile;
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -213,6 +220,12 @@ class SecureDatabase extends _$SecureDatabase {
           // placeholder — there is no way to recover their plaintext.
           if (from < 2) {
             await m.addColumn(messages, messages.plaintext);
+          }
+          // v2 -> v3: add conversations.requestState (message requests). The
+          // column default 0 (accepted) lands every existing conversation in
+          // Chats — never the Requests inbox.
+          if (from < 3) {
+            await m.addColumn(conversations, conversations.requestState);
           }
         },
       );
@@ -327,6 +340,7 @@ class SecureDatabase extends _$SecureDatabase {
             Value(c.lastMessageAt?.toUtc().millisecondsSinceEpoch),
         isArchived: Value(c.isArchived),
         unreadCount: Value(c.unreadCount),
+        requestState: Value(c.requestState.index),
       ),
     );
   }
@@ -346,9 +360,14 @@ class SecureDatabase extends _$SecureDatabase {
     ));
   }
 
+  /// Accepted (in-Chats) conversations only — excludes pending requests and
+  /// blocked peers. Callers that need a row regardless of state (key-pinning,
+  /// _ensureConversation, the block gate) MUST use [getConversationByRecipient].
   Future<List<Conversation>> getConversations() async {
     final rows = await (select(conversations)
-          ..where((c) => c.isArchived.equals(false))
+          ..where((c) =>
+              c.isArchived.equals(false) &
+              c.requestState.equals(ConversationRequestState.accepted.index))
           ..orderBy([
             (c) => OrderingTerm(
                   expression: c.lastMessageAt,
@@ -357,6 +376,45 @@ class SecureDatabase extends _$SecureDatabase {
           ]))
         .get();
     return rows.map(_conversationFromRow).toList(growable: false);
+  }
+
+  /// Pending message-requests (inbound from peers not yet accepted), for the
+  /// Requests inbox. Excludes accepted, blocked, and archived.
+  Future<List<Conversation>> getRequests() async {
+    final rows = await (select(conversations)
+          ..where((c) =>
+              c.isArchived.equals(false) &
+              c.requestState.equals(ConversationRequestState.pending.index))
+          ..orderBy([
+            (c) => OrderingTerm(
+                  expression: c.lastMessageAt,
+                  mode: OrderingMode.desc,
+                )
+          ]))
+        .get();
+    return rows.map(_conversationFromRow).toList(growable: false);
+  }
+
+  /// Looks up a conversation by peer id REGARDLESS of request state (accepted,
+  /// pending, or blocked). Required by the receive path's block gate, by
+  /// _ensureConversation, and by key-pinning — all of which must see rows that
+  /// [getConversations] now hides. Returns null if the peer has no row.
+  Future<Conversation?> getConversationByRecipient(String recipientId) async {
+    final row = await (select(conversations)
+          ..where((c) => c.recipientId.equals(recipientId))
+          ..limit(1))
+        .getSingleOrNull();
+    return row == null ? null : _conversationFromRow(row);
+  }
+
+  /// Sets a conversation's message-request state (accept / block). Mirrors
+  /// [updateConversationKey]; touches only the one row.
+  Future<int> updateConversationState(
+    String conversationId,
+    ConversationRequestState state,
+  ) {
+    return (update(conversations)..where((c) => c.id.equals(conversationId)))
+        .write(ConversationsCompanion(requestState: Value(state.index)));
   }
 
   // -------------------------------------------------------------------------
@@ -520,6 +578,8 @@ class SecureDatabase extends _$SecureDatabase {
               ),
         isArchived: r.isArchived,
         unreadCount: r.unreadCount,
+        requestState:
+            ConversationRequestState.values[r.requestState.clamp(0, 2)],
       );
 
   static Contact _contactFromRow(ContactRow r) => Contact(

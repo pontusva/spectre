@@ -36,6 +36,8 @@ class ConversationListScreen extends StatefulWidget {
 class _ConversationListScreenState extends State<ConversationListScreen> {
   final Uuid _uuid = const Uuid();
   List<Conversation> _conversations = <Conversation>[];
+  // Pending message-requests (inbound from peers not yet accepted).
+  List<Conversation> _requests = <Conversation>[];
   // userId -> Contact, for resolving nicknames in tiles (one batch query).
   Map<String, Contact> _contacts = <String, Contact>{};
   bool _loading = true;
@@ -59,10 +61,12 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
 
   Future<void> _load() async {
     final convs = await widget.database.getConversations();
+    final requests = await widget.database.getRequests();
     final contacts = await widget.database.getAllContacts();
     if (!mounted) return;
     setState(() {
       _conversations = convs;
+      _requests = requests;
       _contacts = {for (final c in contacts) c.userId: c};
       _loading = false;
     });
@@ -150,6 +154,34 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
         // Cascade deletes the linked messages via the FK ON DELETE
         // CASCADE inside SecureDatabase.
         await widget.database.deleteConversation(c.id);
+        break;
+    }
+    await _load();
+  }
+
+  Future<void> _onRequest(Conversation c) async {
+    final action = await showModalBottomSheet<_RequestAction>(
+      context: context,
+      backgroundColor: SpectreColors.blackLess,
+      barrierColor: Colors.black.withOpacity(0.5),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.zero,
+        side: BorderSide(color: SpectreColors.hairline, width: 1),
+      ),
+      builder: (ctx) => _RequestActionsSheet(label: _labelFor(c)),
+    );
+    if (action == null || !mounted) return;
+    switch (action) {
+      case _RequestAction.accept:
+        // Promote to the main Chats list.
+        await widget.database
+            .updateConversationState(c.id, ConversationRequestState.accepted);
+        break;
+      case _RequestAction.block:
+        // Hide + drop future inbound. Keep the row — it IS the blocklist;
+        // deleting it would let the next message recreate a fresh request.
+        await widget.database
+            .updateConversationState(c.id, ConversationRequestState.blocked);
         break;
     }
     await _load();
@@ -245,7 +277,7 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
       );
     }
 
-    if (_conversations.isEmpty) {
+    if (_conversations.isEmpty && _requests.isEmpty) {
       return ListView(
         children: <Widget>[
           const SizedBox(height: 80),
@@ -279,21 +311,37 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
       );
     }
 
-    return ListView.separated(
-      physics: const AlwaysScrollableScrollPhysics(),
-      itemCount: _conversations.length + 1,
-      separatorBuilder: (ctx, idx) => const HairlineDivider(),
-      itemBuilder: (ctx, idx) {
-        if (idx == 0) return const _ListHeader();
-        final c = _conversations[idx - 1];
-        return _ConversationTile(
+    // Assemble: REQUESTS section (if any) above the SESSIONS section.
+    final items = <Widget>[];
+    if (_requests.isNotEmpty) {
+      items.add(_RequestsHeader(count: _requests.length));
+      for (final c in _requests) {
+        items.add(_ConversationTile(
           conversation: c,
           label: _labelFor(c),
           timestampLabel: _formatTimestamp(c.lastMessageAt),
+          // Tap to read the request; long-press to accept / block.
           onTap: () => widget.onOpenConversation(c),
-          onLongPress: () => _onLongPress(c),
-        );
-      },
+          onLongPress: () => _onRequest(c),
+        ));
+      }
+    }
+    items.add(const _ListHeader());
+    for (final c in _conversations) {
+      items.add(_ConversationTile(
+        conversation: c,
+        label: _labelFor(c),
+        timestampLabel: _formatTimestamp(c.lastMessageAt),
+        onTap: () => widget.onOpenConversation(c),
+        onLongPress: () => _onLongPress(c),
+      ));
+    }
+
+    return ListView.separated(
+      physics: const AlwaysScrollableScrollPhysics(),
+      itemCount: items.length,
+      separatorBuilder: (ctx, idx) => const HairlineDivider(),
+      itemBuilder: (ctx, idx) => items[idx],
     );
   }
 }
@@ -320,6 +368,45 @@ class _ListHeader extends StatelessWidget {
               color: SpectreColors.hairline,
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Header for the message-requests section, with a count badge. Tinted with
+/// the accent colour to distinguish it from SESSIONS, and hints the gesture.
+class _RequestsHeader extends StatelessWidget {
+  const _RequestsHeader({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 10),
+      color: SpectreColors.blackDeep,
+      child: Row(
+        children: <Widget>[
+          Text('REQUESTS',
+              style: SpectreTypography.caption().copyWith(
+                color: SpectreColors.purpleBright,
+                letterSpacing: 3,
+              )),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            color: SpectreColors.purpleDeep,
+            child: Text('$count',
+                style: SpectreTypography.stamp()
+                    .copyWith(color: SpectreColors.textBright)),
+          ),
+          const SizedBox(width: 10),
+          Text('long-press to accept / block',
+              style: SpectreTypography.stamp()
+                  .copyWith(color: SpectreColors.textFaint)),
+          const SizedBox(width: 10),
+          Expanded(child: Container(height: 1, color: SpectreColors.hairline)),
         ],
       ),
     );
@@ -448,6 +535,8 @@ class _UnreadBadge extends StatelessWidget {
 
 enum _TileAction { archive, delete }
 
+enum _RequestAction { accept, block }
+
 class _ConversationActionsSheet extends StatelessWidget {
   const _ConversationActionsSheet({
     required this.conversation,
@@ -491,6 +580,60 @@ class _ConversationActionsSheet extends StatelessWidget {
             label: '[ DELETE  ]',
             color: SpectreColors.redDanger,
             onTap: () => Navigator.of(context).pop(_TileAction.delete),
+          ),
+          const HairlineDivider(),
+          const SizedBox(height: 14),
+          _SheetButton(
+            label: 'cancel',
+            color: SpectreColors.textDim,
+            small: true,
+            onTap: () => Navigator.of(context).pop(),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RequestActionsSheet extends StatelessWidget {
+  const _RequestActionsSheet({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+      color: SpectreColors.blackLess,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Container(width: 6, height: 6, color: SpectreColors.purpleBright),
+              const SizedBox(width: 10),
+              Text(
+                label.toUpperCase(),
+                style: SpectreTypography.title().copyWith(fontSize: 13),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text('message request',
+              style: SpectreTypography.caption().copyWith(letterSpacing: 3)),
+          const SizedBox(height: 14),
+          const HairlineDivider(),
+          _SheetButton(
+            label: '[ ACCEPT ]',
+            color: SpectreColors.matrixGreen,
+            onTap: () => Navigator.of(context).pop(_RequestAction.accept),
+          ),
+          const HairlineDivider(),
+          _SheetButton(
+            label: '[ BLOCK  ]',
+            color: SpectreColors.redDanger,
+            onTap: () => Navigator.of(context).pop(_RequestAction.block),
           ),
           const HairlineDivider(),
           const SizedBox(height: 14),
