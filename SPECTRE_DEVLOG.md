@@ -368,6 +368,7 @@ build_runner: latest
 ### Session 3 — Sealed Sender, verification, readable history
 
 NEW files:
+
 - lib/core/crypto/sealed_sender.dart — in-house sealed-sender cipher
   (ephemeral X25519 → HKDF-SHA256 → ChaCha20-Poly1305, recipient-id AAD,
   signed-cert verify). The construction; needs external review.
@@ -379,7 +380,8 @@ NEW files:
   spectre-relay/server/sealed_cert_test.go.
 
 CHANGED (registry above predates these):
-- message_service.dart — sends seal via _sealForWire; receive opens + C2
+
+- message_service.dart — sends seal via \_sealForWire; receive opens + C2
   binding (assertFirstContactIdentity); identity-key TOFU pin + change banner
   flag (NEW-HIGH-1); persistent replay dedup via messageExists (H2); plaintext
   now persisted (see below); RAM plaintext cache; the DEV cleartext shim was
@@ -404,7 +406,7 @@ CHANGED (registry above predates these):
   screen ([ EDIT ] row). No schema change.
 - Message requests (one-sided/Signal-style): conversations.requestState
   (schema v3) {accepted,pending,blocked}; getRequests/getConversationByRecipient/
-  updateConversationState; _ensureConversation(incoming:) + auto-accept; receive
+  updateConversationState; \_ensureConversation(incoming:) + auto-accept; receive
   block-gate; REQUESTS section + Accept/Block sheet. CANARY: key-pin lookups
   switched off getConversations() (now accepted-only) to getConversationByRecipient.
 - Contacts are now created/pinned on the SEND path too (not just receive), so an
@@ -574,8 +576,8 @@ Requirements:
 - [ ] Session mutex — concurrent ratchet advances can corrupt state
 - [ ] No message ordering guarantee — need sequence numbers or vector clock
 - [x] Sealed Sender transport enforcement — DONE in-house (no SealedSessionCipher
-  in libsignal_protocol_dart). See sealed_sender.dart + SEALED_SENDER_REVIEW.md.
-  Remaining: external cryptographer sign-off; H3/H4 construction hardening.
+      in libsignal_protocol_dart). See sealed_sender.dart + SEALED_SENDER_REVIEW.md.
+      Remaining: external cryptographer sign-off; H3/H4 construction hardening.
 
 ### Storage
 
@@ -651,19 +653,19 @@ Requirements:
 ### Why this section exists
 
 The codebase talks about Sealed Sender as if `SealedSessionCipher` will
-wrap outgoing ciphertext at the transport layer (see session_manager.dart
+wrap outgoing ciphertext at the transport layer (see session*manager.dart
 header + the flagged item "Sealed Sender transport enforcement"). **That
 primitive does not exist in `libsignal_protocol_dart` 0.4.1** — there is
 no `SealedSessionCipher`, `SenderCertificate`, or `ServerCertificate` in
 the package. So sealed sender has to be built on the primitives the
-package _does_ expose (`Curve` X25519 ECDH) plus `package:cryptography`
+package \_does* expose (`Curve` X25519 ECDH) plus `package:cryptography`
 (HKDF, ChaCha20-Poly1305) and `package:ed25519_edwards` (cert verify,
 matching the Go relay's `ed25519.Verify`).
 
 ### Root-cause bug being fixed
 
 The **send** path is already metadata-safe (`sendMessage(sealed: true)`
-omits sender_id on the wire). The **receive** path is broken: it _requires_
+omits sender*id on the wire). The **receive** path is broken: it \_requires*
 `envelope['sender_id']` and drops anything without it — so a sealed chat
 message can never be received. The tempting "fix" (put sender_id back on
 the wire as an OpenEnvelope for first contact) was REJECTED: it leaks the
@@ -879,6 +881,6 @@ CLAIM), and external cryptographer review.
 Last updated: Session 3 (2026-05-30) — signed_prekey_id round-trip fixed; Sealed Sender wired into send/receive with C2 enforced (branch feat/sealed-sender-wiring-c2; unit-tested, e2e pending — see SEALED_SENDER_TEST.md)
 Next session: run the two-device e2e (SEALED_SENDER_TEST.md), then close H1/H2/NEW-HIGH-1 and remove the DEV wrapper before any production use; external cryptographer review still required
 
-5FOE5IP-U_PjwonZM1e_eQa1rtDXb4fLYZsobNxRfmM
+oY2GDXxbeIO8yT3DkOj6-JkLxw98JUx8f5qx_Q5LPe0
 
 zqvLRy1vS3ZiVVQmt6JQDpZEqc2CowGjMQkUJ3Vl8zE
