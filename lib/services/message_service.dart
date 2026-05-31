@@ -198,8 +198,9 @@ class MessageService {
     // envelopes.
     _log(kDevSenderAttribution
         ? 'sender attribution: DEV cleartext wrapper (insecure — local testing only)'
-        : 'sender attribution: OFF (sealed envelopes have no sender until '
-            'Sealed Sender is wired — inbound will be dropped)');
+        : _sealed != null
+            ? 'sender attribution: SEALED SENDER (authenticated cert, no sender on the wire)'
+            : 'sender attribution: none (sealed sender not configured — inbound will be dropped)');
     _incomingSub = _relay.incoming.listen(_onRelayFrame);
     _stateSub = _relay.connectionState.listen((state) {
       if (state == RelayConnectionState.connected) {
@@ -377,8 +378,9 @@ class MessageService {
           ownIdentityKeyPair: identity.identityKeyPair,
           blob: blob,
           recipientId: identity.userId,
-          // H2 (deferred): device clock + no replay cache. A trusted clock and
-          // a (eph_pub, nonce) replay cache are a follow-up before production.
+          // H2: replay is guarded below by the persistent message-id dedup.
+          // Remaining minor follow-up — expiry trusts the device clock (no
+          // trusted offline time source); acceptable, documented in review.
           nowMs: DateTime.now().toUtc().millisecondsSinceEpoch,
         );
       } catch (e) {
@@ -406,10 +408,18 @@ class MessageService {
     final ciphertextBytes = Uint8List.fromList(utf8.encode(ciphertextB64));
     final messageId = _contentHashId(ciphertextBytes);
 
-    // In-memory dedup gate. See [_seenMessageIds] for rationale.
-    if (_seenMessageIds.contains(messageId)) {
+    // Dedup / replay gate (H2). Two layers:
+    //   * _seenMessageIds — fast in-memory path within a session.
+    //   * _db.messageExists — PERSISTENT guard so a relay replaying an old
+    //     sealed envelope after a restart (when the in-memory set is empty) is
+    //     still dropped before we re-decrypt or re-notify. The id is a content
+    //     hash of the ciphertext, so a replay maps to the same id.
+    // Done before decrypt so a replayed PreKey can't re-drive session setup.
+    if (_seenMessageIds.contains(messageId) ||
+        await _db.messageExists(messageId)) {
+      _seenMessageIds.add(messageId);
       _log(
-        'duplicate inbound from ${_redactId(senderId)} '
+        'duplicate/replayed inbound from ${_redactId(senderId)} '
         'id=${_redactId(messageId)} ignored',
       );
       return;

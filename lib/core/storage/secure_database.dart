@@ -260,6 +260,20 @@ class SecureDatabase extends _$SecureDatabase {
     return rows.map(_messageFromRow).toList(growable: false);
   }
 
+  /// Whether a message row with [id] already exists. The message id is a
+  /// content hash of the ciphertext, so this doubles as a PERSISTENT replay
+  /// guard: a relay redelivering an old sealed envelope produces the same id,
+  /// and the receive path can drop it even across a restart (when the
+  /// in-memory dedup set is empty). Reuses the existing table — no extra
+  /// on-disk metadata.
+  Future<bool> messageExists(String id) async {
+    final row = await (select(messages)
+          ..where((m) => m.id.equals(id))
+          ..limit(1))
+        .getSingleOrNull();
+    return row != null;
+  }
+
   /// Hard-deletes every message whose expiry has passed. Called on every
   /// foreground resume so a device seized during the disappearing window
   /// has the shortest possible recovery window. Returns the count for

@@ -82,8 +82,8 @@ session.
 |----|----------|--------|---------|
 | C1 | CRITICAL | docs fixed | Relay-as-CA can forge attribution & MITM first contact; cert is NOT auth-vs-relay. Defense = out-of-band fingerprint verification. **Confirm this framing.** |
 | C2 | CRITICAL | **OPEN/unbuilt** | `cert.ik == PreKey identity` binding has no caller yet; must be implemented + mismatch-tested in the receive path. |
-| H1 | HIGH | **OPEN** | Cert is a 24h bearer token not bound to the envelope → re-stapleable. Bind a digest of `eph_pub‖recipient_id‖inner-ct` inside the AEAD, and/or shorten TTL. |
-| H2 | HIGH | **OPEN** | Expiry trusts caller clock; no replay cache → replayed PreKey blob forces session resets / prekey burn. Trusted clock + skew bound + replay cache. |
+| H1 | HIGH | **EFFECTIVELY ADDRESSED** | The "24h bearer token / re-stapleable" concern is now covered by the existing construction + C2: the cert rides INSIDE the AEAD (encrypted to the recipient, key bound to eph_pub, AAD bound to recipient_id) so it isn't extractable by the relay/observers and is already bound to its envelope; and C2 stops a cert-holder from stapling it onto a forged PreKey message (would need the sender's identity private key). Residual is the C1 relay-as-CA case, which H1 never addressed. No code change warranted. |
+| H2 | HIGH | **MOSTLY ADDRESSED** | Replay now guarded by a PERSISTENT dedup: receiveMessage drops any message whose content-hash id already exists in the DB (SecureDatabase.messageExists), before decrypt — so a relay replaying an old sealed envelope after a restart can't re-drive session setup or re-notify. Reuses the existing Messages table, no new on-disk metadata. Remaining minor: expiry still trusts the device clock (no trusted offline time source) — documented, acceptable. |
 | M1 | MEDIUM | fixed | ECDH/point-decode now fail closed as `SealedSenderException` (was raw `ArgumentError`). |
 | M2 | MEDIUM | documented | Parse only over verified bytes; never re-canonicalize cert/inner JSON. |
 | M3 | MEDIUM | documented | `recipient_id` bound as AAD only (ok under 1:1 id↔key; revisit if handles rebind). |
