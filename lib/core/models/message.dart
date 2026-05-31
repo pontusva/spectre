@@ -2,33 +2,27 @@ import 'dart:typed_data';
 
 /// A message as it lives in the encrypted local database.
 ///
-/// IMPORTANT — DO NOT ADD A `plaintext` / `body` / `text` FIELD HERE.
+/// POSTURE NOTE — [plaintext] is persisted, encrypted AT REST.
 ///
-/// This model is the boundary between the encrypted-at-rest database
-/// (`secure_database.dart`) and the rest of the app. Holding only
-/// [ciphertext] guarantees that:
-///   1. Plaintext never leaks into any persistence layer by accident
-///      (sqflite cache, isolate snapshots, crash dumps, hot-reload
-///      state, ListView item-cache, etc.). A model with a plaintext
-///      field will be copied into all of those places without the
-///      developer realising it.
-///   2. Decryption stays an explicit, auditable step: a caller has to
-///      pass [ciphertext] through [SessionManager.decryptMessage] to
-///      get a `String`, and that `String` is held only inside the UI
-///      widget's build scope before being dropped on rebuild. If you
-///      add a plaintext field "for convenience", the threat model
-///      breaks silently — there is no compiler error, only a forensic
-///      finding months later.
-///   3. Panic wipe is meaningful: destroying the SQLCipher key makes
-///      the ciphertext column unrecoverable. If we also cached
-///      plaintext somewhere, the wipe would have to chase it down
-///      across every model copy in memory and on disk.
+/// This model originally held ONLY [ciphertext], to keep plaintext off disk
+/// entirely. That made history unreadable after a restart (the ratchet
+/// ciphertext can never be re-decrypted), which is unusable for a messenger.
+/// We therefore made a deliberate, documented tradeoff: persist [plaintext] in
+/// the SQLCipher-encrypted database (key in the OS keystore) — the same
+/// "encrypted at rest" posture as Signal. See SPECTRE_DEVLOG Principle #2 and
+/// the `messages.plaintext` column comment in secure_database.dart.
 ///
-/// If you find yourself wanting a plaintext field, instead:
-///   - decrypt at the View layer, hold the string in a local variable;
-///   - or add a transient, non-persisted `DecryptedMessage` value type
-///     that lives only for the duration of one render and is not
-///     stored in any list/cache/state container.
+/// What still holds:
+///   - Panic wipe stays meaningful: destroying the SQLCipher key makes the
+///     plaintext column unrecoverable along with everything else.
+///   - The disappearing-message sweep deletes the row (and thus the plaintext).
+/// What changed:
+///   - A seized, UNLOCKED device can read stored history. That is the accepted
+///     cost of readable history; the mitigation is panic-wipe + short
+///     disappearing timers, not absence-from-disk.
+///
+/// Keep [plaintext] confined to this persistence boundary and the chat view —
+/// do NOT fan it out into long-lived caches/providers beyond what the UI needs.
 class Message {
   /// UUID for the message row. Generated client-side so that the relay
   /// server never sees a server-assigned ID that could be used to
@@ -43,6 +37,12 @@ class Message {
   /// This is the ONLY representation of the message content kept in
   /// the model.
   final Uint8List ciphertext;
+
+  /// Decrypted message text, persisted encrypted-at-rest (see class doc).
+  /// Null when unknown — e.g. an inbound message that never decrypted, or a
+  /// pre-v2 row from before this column existed; the UI then shows the
+  /// ciphertext placeholder.
+  final String? plaintext;
 
   final DateTime timestamp;
   final bool isRead;
@@ -65,6 +65,7 @@ class Message {
     required this.senderId,
     required this.ciphertext,
     required this.timestamp,
+    this.plaintext,
     this.isRead = false,
     this.expiresAt,
     this.isMine = false,
@@ -95,6 +96,7 @@ class Message {
       conversationId: map['conversation_id'] as String,
       senderId: map['sender_id'] as String,
       ciphertext: _readBytes(map['ciphertext']),
+      plaintext: map['plaintext'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(
         map['timestamp'] as int,
         isUtc: true,
@@ -115,6 +117,7 @@ class Message {
       'conversation_id': conversationId,
       'sender_id': senderId,
       'ciphertext': ciphertext,
+      'plaintext': plaintext,
       'timestamp': timestamp.toUtc().millisecondsSinceEpoch,
       'is_read': isRead ? 1 : 0,
       'expires_at': expiresAt?.toUtc().millisecondsSinceEpoch,
@@ -131,6 +134,7 @@ class Message {
       conversationId: conversationId,
       senderId: senderId,
       ciphertext: ciphertext,
+      plaintext: plaintext,
       timestamp: timestamp,
       isRead: isRead ?? this.isRead,
       expiresAt: expiresAt ?? this.expiresAt,

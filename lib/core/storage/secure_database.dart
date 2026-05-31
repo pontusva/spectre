@@ -39,11 +39,22 @@ class Messages extends Table {
 
   TextColumn get senderId => text()();
 
-  // The only representation of message content in the database. Encoded
-  // by SessionManager.encryptMessage and stored verbatim. Plaintext NEVER
-  // enters this column — the schema's NOT NULL BLOB constraint enforces
-  // the contract at write time.
+  // The Signal ciphertext envelope (SessionManager.encryptMessage output).
+  // Retained for the content-hash message id / replay dedup; it can never be
+  // re-decrypted (the Double Ratchet is one-time), so it is NOT what renders
+  // history.
   BlobColumn get ciphertext => blob()();
+
+  // DELIBERATE POSTURE DECISION (see also Message model + SPECTRE_DEVLOG
+  // Principle #2): readable message history requires storing the plaintext,
+  // because the ratchet ciphertext above is unrecoverable. This column holds
+  // it, encrypted AT REST by SQLCipher (key in the OS keystore) — the same
+  // posture as Signal. Nullable: inbound messages that never decrypted, and
+  // legacy rows, have null. Panic-wipe (key destruction) and the
+  // disappearing-message sweep both purge it by removing the row. A seized,
+  // UNLOCKED device can read it — that is the accepted cost of usable history;
+  // panic-wipe is the mitigation.
+  TextColumn get plaintext => text().nullable()();
 
   // Stored as Unix milliseconds. We don't use drift's dateTime() type so
   // that wire-format compatibility with the previous sqflite schema is
@@ -191,7 +202,20 @@ class SecureDatabase extends _$SecureDatabase {
   File? _dbFile;
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+        onCreate: (m) => m.createAll(),
+        onUpgrade: (m, from, to) async {
+          // v1 -> v2: add messages.plaintext (readable history, encrypted at
+          // rest). Existing rows get null and keep showing the ciphertext
+          // placeholder — there is no way to recover their plaintext.
+          if (from < 2) {
+            await m.addColumn(messages, messages.plaintext);
+          }
+        },
+      );
 
   static FlutterSecureStorage _defaultStorage() => const FlutterSecureStorage(
         aOptions: AndroidOptions(
@@ -242,6 +266,7 @@ class SecureDatabase extends _$SecureDatabase {
         conversationId: Value(m.conversationId),
         senderId: Value(m.senderId),
         ciphertext: Value(m.ciphertext),
+        plaintext: Value(m.plaintext),
         timestamp: Value(m.timestamp.toUtc().millisecondsSinceEpoch),
         isRead: Value(m.isRead),
         expiresAt:
@@ -459,6 +484,7 @@ class SecureDatabase extends _$SecureDatabase {
         conversationId: r.conversationId,
         senderId: r.senderId,
         ciphertext: Uint8List.fromList(r.ciphertext),
+        plaintext: r.plaintext,
         timestamp:
             DateTime.fromMillisecondsSinceEpoch(r.timestamp, isUtc: true),
         isRead: r.isRead,

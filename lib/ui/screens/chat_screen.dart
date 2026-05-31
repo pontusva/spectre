@@ -124,9 +124,11 @@ class _ChatScreenState extends State<ChatScreen> {
             senderId: msg.senderId,
             timestamp: msg.timestamp,
             expiresAt: msg.expiresAt,
-            // RAM-cached plaintext if it was decrypted earlier this session;
-            // null otherwise -> ciphertext placeholder (older / post-restart).
-            plaintext: widget.messageService.cachedPlaintext(msg.id),
+            // Persisted plaintext (encrypted at rest) survives restarts; fall
+            // back to the in-session RAM cache; null -> ciphertext placeholder
+            // (e.g. a message that never decrypted, or a pre-v2 row).
+            plaintext: msg.plaintext ??
+                widget.messageService.cachedPlaintext(msg.id),
             status: msg.senderId == widget.currentUserId ? _Status.sent : null,
           ));
         }

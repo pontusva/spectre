@@ -230,6 +230,9 @@ class MessageService {
         conversationId: conversationId,
         senderId: identity.userId,
         ciphertext: ciphertextBytes,
+        // Persist our own sent text (encrypted at rest) so it survives a
+        // restart, not just this session.
+        plaintext: plaintext,
         timestamp: now,
         isRead: true,
         isMine: true,
@@ -426,6 +429,9 @@ class MessageService {
         conversationId: conversationId,
         senderId: senderId,
         ciphertext: ciphertextBytes,
+        // Persist the decrypted text (encrypted at rest), or null if this
+        // message could not be decrypted — then it shows the placeholder.
+        plaintext: plaintext,
         timestamp: timestamp,
       ));
     } catch (e) {

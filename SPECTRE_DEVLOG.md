@@ -45,7 +45,12 @@ Primary adversaries: state actors, corporate surveillance, forensic device analy
 ### Security Principles (in priority order)
 
 1. Fail closed — every error defaults to the secure path
-2. No plaintext ever on disk — schema enforces this at the database level
+2. No plaintext at rest in the clear — message plaintext is persisted ONLY in
+   the SQLCipher-encrypted DB (key in the OS keystore), never unencrypted.
+   (Revised from "no plaintext EVER on disk": history was unreadable after a
+   restart because ratchet ciphertext is one-time. Now encrypted-at-rest, the
+   Signal posture — see messages.plaintext + the Message model. Panic-wipe
+   destroys the key; disappearing-message sweep deletes rows.)
 3. Minimal metadata — server learns as little as possible about who talks to whom
 4. Forward secrecy — past messages safe even if keys are compromised
 5. Panic wipe — full identity destruction must always be one deliberate action away

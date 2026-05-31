@@ -503,6 +503,17 @@ class $MessagesTable extends Messages
     type: DriftSqlType.blob,
     requiredDuringInsert: true,
   );
+  static const VerificationMeta _plaintextMeta = const VerificationMeta(
+    'plaintext',
+  );
+  @override
+  late final GeneratedColumn<String> plaintext = GeneratedColumn<String>(
+    'plaintext',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _timestampMeta = const VerificationMeta(
     'timestamp',
   );
@@ -557,6 +568,7 @@ class $MessagesTable extends Messages
     conversationId,
     senderId,
     ciphertext,
+    plaintext,
     timestamp,
     isRead,
     expiresAt,
@@ -605,6 +617,12 @@ class $MessagesTable extends Messages
       );
     } else if (isInserting) {
       context.missing(_ciphertextMeta);
+    }
+    if (data.containsKey('plaintext')) {
+      context.handle(
+        _plaintextMeta,
+        plaintext.isAcceptableOrUnknown(data['plaintext']!, _plaintextMeta),
+      );
     }
     if (data.containsKey('timestamp')) {
       context.handle(
@@ -657,6 +675,10 @@ class $MessagesTable extends Messages
         DriftSqlType.blob,
         data['${effectivePrefix}ciphertext'],
       )!,
+      plaintext: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}plaintext'],
+      ),
       timestamp: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}timestamp'],
@@ -687,6 +709,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
   final String conversationId;
   final String senderId;
   final Uint8List ciphertext;
+  final String? plaintext;
   final int timestamp;
   final bool isRead;
   final int? expiresAt;
@@ -696,6 +719,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     required this.conversationId,
     required this.senderId,
     required this.ciphertext,
+    this.plaintext,
     required this.timestamp,
     required this.isRead,
     this.expiresAt,
@@ -708,6 +732,9 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     map['conversation_id'] = Variable<String>(conversationId);
     map['sender_id'] = Variable<String>(senderId);
     map['ciphertext'] = Variable<Uint8List>(ciphertext);
+    if (!nullToAbsent || plaintext != null) {
+      map['plaintext'] = Variable<String>(plaintext);
+    }
     map['timestamp'] = Variable<int>(timestamp);
     map['is_read'] = Variable<bool>(isRead);
     if (!nullToAbsent || expiresAt != null) {
@@ -723,6 +750,9 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       conversationId: Value(conversationId),
       senderId: Value(senderId),
       ciphertext: Value(ciphertext),
+      plaintext: plaintext == null && nullToAbsent
+          ? const Value.absent()
+          : Value(plaintext),
       timestamp: Value(timestamp),
       isRead: Value(isRead),
       expiresAt: expiresAt == null && nullToAbsent
@@ -742,6 +772,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       conversationId: serializer.fromJson<String>(json['conversationId']),
       senderId: serializer.fromJson<String>(json['senderId']),
       ciphertext: serializer.fromJson<Uint8List>(json['ciphertext']),
+      plaintext: serializer.fromJson<String?>(json['plaintext']),
       timestamp: serializer.fromJson<int>(json['timestamp']),
       isRead: serializer.fromJson<bool>(json['isRead']),
       expiresAt: serializer.fromJson<int?>(json['expiresAt']),
@@ -756,6 +787,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       'conversationId': serializer.toJson<String>(conversationId),
       'senderId': serializer.toJson<String>(senderId),
       'ciphertext': serializer.toJson<Uint8List>(ciphertext),
+      'plaintext': serializer.toJson<String?>(plaintext),
       'timestamp': serializer.toJson<int>(timestamp),
       'isRead': serializer.toJson<bool>(isRead),
       'expiresAt': serializer.toJson<int?>(expiresAt),
@@ -768,6 +800,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     String? conversationId,
     String? senderId,
     Uint8List? ciphertext,
+    Value<String?> plaintext = const Value.absent(),
     int? timestamp,
     bool? isRead,
     Value<int?> expiresAt = const Value.absent(),
@@ -777,6 +810,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     conversationId: conversationId ?? this.conversationId,
     senderId: senderId ?? this.senderId,
     ciphertext: ciphertext ?? this.ciphertext,
+    plaintext: plaintext.present ? plaintext.value : this.plaintext,
     timestamp: timestamp ?? this.timestamp,
     isRead: isRead ?? this.isRead,
     expiresAt: expiresAt.present ? expiresAt.value : this.expiresAt,
@@ -792,6 +826,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       ciphertext: data.ciphertext.present
           ? data.ciphertext.value
           : this.ciphertext,
+      plaintext: data.plaintext.present ? data.plaintext.value : this.plaintext,
       timestamp: data.timestamp.present ? data.timestamp.value : this.timestamp,
       isRead: data.isRead.present ? data.isRead.value : this.isRead,
       expiresAt: data.expiresAt.present ? data.expiresAt.value : this.expiresAt,
@@ -806,6 +841,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
           ..write('conversationId: $conversationId, ')
           ..write('senderId: $senderId, ')
           ..write('ciphertext: $ciphertext, ')
+          ..write('plaintext: $plaintext, ')
           ..write('timestamp: $timestamp, ')
           ..write('isRead: $isRead, ')
           ..write('expiresAt: $expiresAt, ')
@@ -820,6 +856,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     conversationId,
     senderId,
     $driftBlobEquality.hash(ciphertext),
+    plaintext,
     timestamp,
     isRead,
     expiresAt,
@@ -833,6 +870,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
           other.conversationId == this.conversationId &&
           other.senderId == this.senderId &&
           $driftBlobEquality.equals(other.ciphertext, this.ciphertext) &&
+          other.plaintext == this.plaintext &&
           other.timestamp == this.timestamp &&
           other.isRead == this.isRead &&
           other.expiresAt == this.expiresAt &&
@@ -844,6 +882,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
   final Value<String> conversationId;
   final Value<String> senderId;
   final Value<Uint8List> ciphertext;
+  final Value<String?> plaintext;
   final Value<int> timestamp;
   final Value<bool> isRead;
   final Value<int?> expiresAt;
@@ -854,6 +893,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     this.conversationId = const Value.absent(),
     this.senderId = const Value.absent(),
     this.ciphertext = const Value.absent(),
+    this.plaintext = const Value.absent(),
     this.timestamp = const Value.absent(),
     this.isRead = const Value.absent(),
     this.expiresAt = const Value.absent(),
@@ -865,6 +905,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     required String conversationId,
     required String senderId,
     required Uint8List ciphertext,
+    this.plaintext = const Value.absent(),
     required int timestamp,
     this.isRead = const Value.absent(),
     this.expiresAt = const Value.absent(),
@@ -880,6 +921,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     Expression<String>? conversationId,
     Expression<String>? senderId,
     Expression<Uint8List>? ciphertext,
+    Expression<String>? plaintext,
     Expression<int>? timestamp,
     Expression<bool>? isRead,
     Expression<int>? expiresAt,
@@ -891,6 +933,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
       if (conversationId != null) 'conversation_id': conversationId,
       if (senderId != null) 'sender_id': senderId,
       if (ciphertext != null) 'ciphertext': ciphertext,
+      if (plaintext != null) 'plaintext': plaintext,
       if (timestamp != null) 'timestamp': timestamp,
       if (isRead != null) 'is_read': isRead,
       if (expiresAt != null) 'expires_at': expiresAt,
@@ -904,6 +947,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     Value<String>? conversationId,
     Value<String>? senderId,
     Value<Uint8List>? ciphertext,
+    Value<String?>? plaintext,
     Value<int>? timestamp,
     Value<bool>? isRead,
     Value<int?>? expiresAt,
@@ -915,6 +959,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
       conversationId: conversationId ?? this.conversationId,
       senderId: senderId ?? this.senderId,
       ciphertext: ciphertext ?? this.ciphertext,
+      plaintext: plaintext ?? this.plaintext,
       timestamp: timestamp ?? this.timestamp,
       isRead: isRead ?? this.isRead,
       expiresAt: expiresAt ?? this.expiresAt,
@@ -937,6 +982,9 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     }
     if (ciphertext.present) {
       map['ciphertext'] = Variable<Uint8List>(ciphertext.value);
+    }
+    if (plaintext.present) {
+      map['plaintext'] = Variable<String>(plaintext.value);
     }
     if (timestamp.present) {
       map['timestamp'] = Variable<int>(timestamp.value);
@@ -963,6 +1011,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
           ..write('conversationId: $conversationId, ')
           ..write('senderId: $senderId, ')
           ..write('ciphertext: $ciphertext, ')
+          ..write('plaintext: $plaintext, ')
           ..write('timestamp: $timestamp, ')
           ..write('isRead: $isRead, ')
           ..write('expiresAt: $expiresAt, ')
@@ -1786,6 +1835,7 @@ typedef $$MessagesTableCreateCompanionBuilder =
       required String conversationId,
       required String senderId,
       required Uint8List ciphertext,
+      Value<String?> plaintext,
       required int timestamp,
       Value<bool> isRead,
       Value<int?> expiresAt,
@@ -1798,6 +1848,7 @@ typedef $$MessagesTableUpdateCompanionBuilder =
       Value<String> conversationId,
       Value<String> senderId,
       Value<Uint8List> ciphertext,
+      Value<String?> plaintext,
       Value<int> timestamp,
       Value<bool> isRead,
       Value<int?> expiresAt,
@@ -1850,6 +1901,11 @@ class $$MessagesTableFilterComposer
 
   ColumnFilters<Uint8List> get ciphertext => $composableBuilder(
     column: $table.ciphertext,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get plaintext => $composableBuilder(
+    column: $table.plaintext,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -1921,6 +1977,11 @@ class $$MessagesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get plaintext => $composableBuilder(
+    column: $table.plaintext,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<int> get timestamp => $composableBuilder(
     column: $table.timestamp,
     builder: (column) => ColumnOrderings(column),
@@ -1984,6 +2045,9 @@ class $$MessagesTableAnnotationComposer
     column: $table.ciphertext,
     builder: (column) => column,
   );
+
+  GeneratedColumn<String> get plaintext =>
+      $composableBuilder(column: $table.plaintext, builder: (column) => column);
 
   GeneratedColumn<int> get timestamp =>
       $composableBuilder(column: $table.timestamp, builder: (column) => column);
@@ -2053,6 +2117,7 @@ class $$MessagesTableTableManager
                 Value<String> conversationId = const Value.absent(),
                 Value<String> senderId = const Value.absent(),
                 Value<Uint8List> ciphertext = const Value.absent(),
+                Value<String?> plaintext = const Value.absent(),
                 Value<int> timestamp = const Value.absent(),
                 Value<bool> isRead = const Value.absent(),
                 Value<int?> expiresAt = const Value.absent(),
@@ -2063,6 +2128,7 @@ class $$MessagesTableTableManager
                 conversationId: conversationId,
                 senderId: senderId,
                 ciphertext: ciphertext,
+                plaintext: plaintext,
                 timestamp: timestamp,
                 isRead: isRead,
                 expiresAt: expiresAt,
@@ -2075,6 +2141,7 @@ class $$MessagesTableTableManager
                 required String conversationId,
                 required String senderId,
                 required Uint8List ciphertext,
+                Value<String?> plaintext = const Value.absent(),
                 required int timestamp,
                 Value<bool> isRead = const Value.absent(),
                 Value<int?> expiresAt = const Value.absent(),
@@ -2085,6 +2152,7 @@ class $$MessagesTableTableManager
                 conversationId: conversationId,
                 senderId: senderId,
                 ciphertext: ciphertext,
+                plaintext: plaintext,
                 timestamp: timestamp,
                 isRead: isRead,
                 expiresAt: expiresAt,
