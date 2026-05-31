@@ -4,10 +4,12 @@
 # dev relay. Companion to spectre-relay/run-dev.sh; see SEALED_SENDER_TEST.md
 # for the full two-device checklist.
 #
+# Sealed Sender is the only path: the app fetches + TOFU-pins the relay CA key
+# at startup and seals every message (no cleartext fallback).
+#
 # Overridable from the environment:
-#   SPECTRE_RELAY_URL        ws:// or wss:// relay endpoint (default localhost)
-#   SPECTRE_DEV_ATTRIBUTION  true = insecure DEV cleartext sender wrapper
-#                            (local testing only); false = real Sealed Sender
+#   SPECTRE_RELAY_URL  ws:// or wss:// relay endpoint (default localhost)
+#   RELAY_HOST/PORT/PATH  parts used when SPECTRE_RELAY_URL is unset
 #
 # Extra `flutter run` flags pass straight through, e.g.:
 #   ./run-linux.sh --release
@@ -31,7 +33,6 @@ RELAY_HOST="${RELAY_HOST:-localhost}"
 RELAY_PORT="${RELAY_PORT:-8080}"
 RELAY_PATH="${RELAY_PATH:-/ws}"
 RELAY_URL="${SPECTRE_RELAY_URL:-ws://${RELAY_HOST}:${RELAY_PORT}${RELAY_PATH}}"
-DEV_ATTRIBUTION="${SPECTRE_DEV_ATTRIBUTION:-false}"
 
 if [[ "$RELAY_URL" != ws://* && "$RELAY_URL" != wss://* ]]; then
   echo "error: SPECTRE_RELAY_URL must be ws:// or wss:// (got: $RELAY_URL)" >&2
@@ -39,11 +40,7 @@ if [[ "$RELAY_URL" != ws://* && "$RELAY_URL" != wss://* ]]; then
 fi
 
 echo "Launching Spectre on Linux desktop"
-echo "  relay url:       ${RELAY_URL}"
-echo "  dev attribution: ${DEV_ATTRIBUTION} (false = real Sealed Sender)"
-if [[ "$DEV_ATTRIBUTION" == "true" ]]; then
-  echo "  WARNING: DEV attribution leaks the sender id in cleartext — local testing only."
-fi
+echo "  relay url: ${RELAY_URL}  (sealed sender — CA pinned at startup)"
 echo "  (first run / after schema changes: flutter pub get &&"
 echo "   dart run build_runner build --delete-conflicting-outputs)"
 echo
@@ -51,5 +48,4 @@ echo
 # exec so Ctrl-C reaches flutter. Trailing "$@" forwards any extra run flags.
 exec flutter run -d linux \
   --dart-define=SPECTRE_RELAY_URL="$RELAY_URL" \
-  --dart-define=SPECTRE_DEV_ATTRIBUTION="$DEV_ATTRIBUTION" \
   "$@"

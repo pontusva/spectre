@@ -164,20 +164,17 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
       relayService.attachPrekeyService(prekeyService);
 
       // Sealed Sender: fetch + TOFU-pin the relay's CA key, then build a
-      // SealedSender bound to it. Skipped for DEV-attribution builds (which
-      // use the cleartext wrapper). Boot-resilient: if the CA key can't be
+      // SealedSender bound to it. Boot-resilient: if the CA key can't be
       // obtained (relay unreachable and none pinned) we proceed with a null
-      // SealedSender — sealed messaging stays unavailable until a restart with
-      // the relay reachable, rather than blocking app bring-up. The HTTP fetch
-      // is internally bounded by a timeout.
+      // SealedSender — sealed messaging stays unavailable (send queues, inbound
+      // drops) until a restart with the relay reachable, rather than blocking
+      // app bring-up. The HTTP fetch is internally bounded by a timeout.
       SealedSender? sealedSender;
-      if (!kDevSenderAttribution) {
-        try {
-          sealedSender =
-              await SealedCaService(relayUrl: relayUri).sealedSender();
-        } catch (_) {
-          sealedSender = null;
-        }
+      try {
+        sealedSender =
+            await SealedCaService(relayUrl: relayUri).sealedSender();
+      } catch (_) {
+        sealedSender = null;
       }
 
       final messageService = MessageService(

@@ -17,22 +17,6 @@ import '../core/storage/secure_database.dart';
 import 'network/prekey_service.dart';
 import 'network/relay_service.dart';
 
-/// DEV-ONLY sender attribution shortcut for local two-device testing.
-///
-/// When true, the sender's user id is wrapped (in CLEARTEXT) alongside the
-/// ratchet ciphertext on the wire so the recipient can attribute and route a
-/// message WITHOUT Sealed Sender being wired up yet. This intentionally LEAKS
-/// the sender id to anyone who can parse the ciphertext blob — including the
-/// relay — so it MUST NEVER be enabled for the production/activist build. The
-/// secure replacement is Sealed Sender (see SEALED_SENDER_REVIEW.md); when
-/// that lands, this flag and its [_devWrap]/[_devUnwrap] helpers go away.
-///
-/// Off by default — a production build has no sender attribution path until
-/// Sealed Sender is wired. Enable for local testing with:
-///   flutter run --dart-define=SPECTRE_DEV_ATTRIBUTION=true
-const bool kDevSenderAttribution =
-    bool.fromEnvironment('SPECTRE_DEV_ATTRIBUTION', defaultValue: false);
-
 /// Coarse outcome of a [MessageService.sendMessage] call.
 enum MessageStatus {
   /// Encrypted, persisted, and acknowledged by the relay.
@@ -127,11 +111,10 @@ class MessageService {
   // one. See receiveMessage().
   final PrekeyService _prekeyService;
 
-  // Sealed Sender. Null only in tests / the DEV-attribution composition;
-  // when present (and [kDevSenderAttribution] is false), outgoing messages are
-  // sealed with seal() and incoming ones are unwrapped with open() + the C2
-  // identity binding. When null and dev attribution is off, the receive path
-  // fails closed (drops sealed envelopes) rather than trusting a wire sender.
+  // Sealed Sender. Outgoing messages are sealed with seal(); incoming ones are
+  // opened with open() + the C2 identity binding. Null only when the relay CA
+  // could not be pinned this run (or in tests); then send queues and receive
+  // fails closed (drops) — there is NO unsealed fallback path.
   final SealedSender? _sealed;
 
   final Uuid _uuid;
@@ -190,17 +173,13 @@ class MessageService {
         _prekeyService = prekeyService,
         _sealed = sealedSender,
         _uuid = uuid ?? const Uuid() {
-    // Announce the sender-attribution mode once at startup. SPECTRE_DEV_
-    // ATTRIBUTION is a compile-time const, so it only takes effect on a full
-    // `flutter run` (not hot reload/restart) and must be set on BOTH the
-    // sender and receiver builds. This line lets you confirm the flag
-    // actually reached this build instead of inferring it from dropped
-    // envelopes.
-    _log(kDevSenderAttribution
-        ? 'sender attribution: DEV cleartext wrapper (insecure — local testing only)'
-        : _sealed != null
-            ? 'sender attribution: SEALED SENDER (authenticated cert, no sender on the wire)'
-            : 'sender attribution: none (sealed sender not configured — inbound will be dropped)');
+    // Announce the sealed-sender state once at startup, so a build that
+    // couldn't pin the relay CA (sealed sender unavailable) is obvious rather
+    // than silently dropping every message.
+    _log(_sealed != null
+        ? 'sealed sender: ACTIVE (authenticated cert, no sender on the wire)'
+        : 'sealed sender: UNAVAILABLE (relay CA not pinned — messaging disabled '
+            'until reachable)');
     _incomingSub = _relay.incoming.listen(_onRelayFrame);
     _stateSub = _relay.connectionState.listen((state) {
       if (state == RelayConnectionState.connected) {
@@ -240,10 +219,10 @@ class MessageService {
     final now = DateTime.now().toUtc();
 
     // The local DB always stores the inner ratchet ciphertext, never the wire
-    // form. The wire form (sealed blob, or the DEV cleartext wrapper) is built
-    // at delivery time by [_deliver] so a send that can't be sealed yet — no
-    // session identity or no sender certificate — is queued and resealed on
-    // the next drain, never sent unsealed.
+    // form. The sealed-sender blob is built at delivery time by [_deliver] so
+    // a send that can't be sealed yet — no session identity or no sender
+    // certificate — is queued and resealed on the next drain, never sent
+    // unsealed.
     final ciphertextBytes = Uint8List.fromList(utf8.encode(ciphertextB64));
     try {
       await _db.insertMessage(Message(
@@ -285,13 +264,7 @@ class MessageService {
   /// sealed path NEVER falls back to sending an unsealed envelope — failing
   /// closed is the whole point of sealed sender.
   Future<void> _deliver(String recipientId, String innerCtB64) async {
-    final String wireCtB64;
-    if (kDevSenderAttribution) {
-      final identity = await _identity.loadOrCreate();
-      wireCtB64 = _devWrap(identity.userId, innerCtB64);
-    } else {
-      wireCtB64 = await _sealForWire(recipientId, innerCtB64);
-    }
+    final wireCtB64 = await _sealForWire(recipientId, innerCtB64);
     await _relay.sendMessage(
       recipientId: recipientId,
       ciphertextB64: wireCtB64,
@@ -341,69 +314,56 @@ class MessageService {
       return;
     }
 
-    // Resolve the sender. With DEV attribution we unwrap a cleartext
-    // {from, ct} wrapper carried inside the ciphertext field (local
-    // two-device testing only — see [kDevSenderAttribution]). Otherwise the
-    // ciphertext field is a Sealed Sender blob: we open it with our identity
-    // key, which yields the authenticated sender id and the inner ratchet
+    // The ciphertext field is a Sealed Sender blob: open it with our identity
+    // key to recover the AUTHENTICATED sender id and the inner ratchet
     // ciphertext. There is NO sender_id fallback — a frame we cannot open is
-    // dropped (fail closed).
-    final String senderId;
-    final String ciphertextB64;
-    if (kDevSenderAttribution) {
-      final unwrapped = _devUnwrap(rawCiphertext);
-      if (unwrapped == null) {
-        _log('dropped envelope: dev attribution wrapper parse failed');
-        return;
-      }
-      senderId = unwrapped.$1;
-      ciphertextB64 = unwrapped.$2;
-    } else {
-      final sealed = _sealed;
-      if (sealed == null) {
-        _log('dropped envelope: sealed sender not configured');
-        return;
-      }
-      final Uint8List blob;
-      try {
-        blob = base64Decode(rawCiphertext);
-      } catch (_) {
-        _log('dropped envelope: sealed blob not base64');
-        return;
-      }
-      final identity = await _identity.loadOrCreate();
-      final OpenedSealed opened;
-      try {
-        opened = await sealed.open(
-          ownIdentityKeyPair: identity.identityKeyPair,
-          blob: blob,
-          recipientId: identity.userId,
-          // H2: replay is guarded below by the persistent message-id dedup.
-          // Remaining minor follow-up — expiry trusts the device clock (no
-          // trusted offline time source); acceptable, documented in review.
-          nowMs: DateTime.now().toUtc().millisecondsSinceEpoch,
-        );
-      } catch (e) {
-        // Any malformed/forged/expired sealed envelope. Fail closed; log the
-        // runtime type only, never the blob bytes or cert fields.
-        _log('dropped sealed envelope :: ${e.runtimeType}');
-        return;
-      }
-      // C2: bind the certified sender identity to the identity key inside a
-      // first-contact PreKey message BEFORE any decrypt/session init, so a
-      // hostile relay cannot staple a valid cert onto someone else's message.
-      try {
-        SessionManager.assertFirstContactIdentity(
-          opened.innerCiphertextB64,
-          opened.senderIdentityKeyRaw,
-        );
-      } catch (e) {
-        _log('dropped sealed envelope: identity binding :: ${e.runtimeType}');
-        return;
-      }
-      senderId = opened.senderId;
-      ciphertextB64 = opened.innerCiphertextB64;
+    // dropped (fail closed). If sealed sender isn't configured (relay CA not
+    // pinned this run), there is no authenticated way to attribute an inbound
+    // message, so we drop it rather than trust the wire.
+    final sealed = _sealed;
+    if (sealed == null) {
+      _log('dropped envelope: sealed sender not configured');
+      return;
     }
+    final Uint8List blob;
+    try {
+      blob = base64Decode(rawCiphertext);
+    } catch (_) {
+      _log('dropped envelope: sealed blob not base64');
+      return;
+    }
+    final identity = await _identity.loadOrCreate();
+    final OpenedSealed opened;
+    try {
+      opened = await sealed.open(
+        ownIdentityKeyPair: identity.identityKeyPair,
+        blob: blob,
+        recipientId: identity.userId,
+        // H2: replay is guarded below by the persistent message-id dedup.
+        // Remaining minor follow-up — expiry trusts the device clock (no
+        // trusted offline time source); acceptable, documented in review.
+        nowMs: DateTime.now().toUtc().millisecondsSinceEpoch,
+      );
+    } catch (e) {
+      // Any malformed/forged/expired sealed envelope. Fail closed; log the
+      // runtime type only, never the blob bytes or cert fields.
+      _log('dropped sealed envelope :: ${e.runtimeType}');
+      return;
+    }
+    // C2: bind the certified sender identity to the identity key inside a
+    // first-contact PreKey message BEFORE any decrypt/session init, so a
+    // hostile relay cannot staple a valid cert onto someone else's message.
+    try {
+      SessionManager.assertFirstContactIdentity(
+        opened.innerCiphertextB64,
+        opened.senderIdentityKeyRaw,
+      );
+    } catch (e) {
+      _log('dropped sealed envelope: identity binding :: ${e.runtimeType}');
+      return;
+    }
+    final senderId = opened.senderId;
+    final ciphertextB64 = opened.innerCiphertextB64;
 
     final ciphertextBytes = Uint8List.fromList(utf8.encode(ciphertextB64));
     final messageId = _contentHashId(ciphertextBytes);
@@ -604,30 +564,6 @@ class MessageService {
     // carries a ciphertext is a delivery.
     if (envelope['ciphertext'] is! String) return;
     await receiveMessage(envelope);
-  }
-
-  /// DEV-ONLY ([kDevSenderAttribution]): pack the sender id in cleartext
-  /// alongside the ratchet ciphertext. base64(json) so it survives the
-  /// relay's opaque `ciphertext` field untouched. NOT a security boundary —
-  /// the relay can read `from`. Removed when Sealed Sender lands.
-  String _devWrap(String senderId, String ciphertextB64) {
-    return base64Encode(utf8.encode(
-      jsonEncode(<String, String>{'from': senderId, 'ct': ciphertextB64}),
-    ));
-  }
-
-  /// Inverse of [_devWrap]. Returns (senderId, ciphertextB64) or null if the
-  /// blob is not a dev wrapper (fail closed — caller drops the envelope).
-  (String, String)? _devUnwrap(String wire) {
-    try {
-      final decoded = jsonDecode(utf8.decode(base64Decode(wire)));
-      if (decoded is Map<String, dynamic>) {
-        final from = decoded['from'];
-        final ct = decoded['ct'];
-        if (from is String && ct is String) return (from, ct);
-      }
-    } catch (_) {/* not a dev wrapper */}
-    return null;
   }
 
   Future<void> _drainPending() async {
