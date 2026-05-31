@@ -24,7 +24,13 @@ if ! command -v flutter >/dev/null 2>&1; then
   exit 1
 fi
 
-RELAY_URL="${SPECTRE_RELAY_URL:-ws://localhost:8080/ws}"
+# Built from parts (symmetric with run-macos.sh) so host/port can be overridden
+# without re-typing the whole URL. localhost by default since the Linux box
+# usually also runs the relay. A full SPECTRE_RELAY_URL override still wins.
+RELAY_HOST="${RELAY_HOST:-localhost}"
+RELAY_PORT="${RELAY_PORT:-8080}"
+RELAY_PATH="${RELAY_PATH:-/ws}"
+RELAY_URL="${SPECTRE_RELAY_URL:-ws://${RELAY_HOST}:${RELAY_PORT}${RELAY_PATH}}"
 DEV_ATTRIBUTION="${SPECTRE_DEV_ATTRIBUTION:-false}"
 
 if [[ "$RELAY_URL" != ws://* && "$RELAY_URL" != wss://* ]]; then
