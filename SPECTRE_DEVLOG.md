@@ -657,10 +657,13 @@ code-interop) — full consolidated table in SEALED_SENDER_REVIEW.md §5b:
 - FIXED in core: M-NEW-2 (cert base64 fail-closed), M-NEW-4 (accept num exp
   for Dart-web), L-NEW-1 (double-unmarshal), H-NEW-1 (added Go→Dart Ed25519
   golden vector + more fail-closed tests; now 11 Dart + 2 Go tests green).
-- NEW-HIGH-1 (important, OPEN): out-of-band verification — the WHOLE C1
-  defense — is NOT enforced. isVerified is handle-keyed, never consulted on
-  decrypt/display, not pinned to identity-key bytes; recipientPublicKey is ''.
-  Must become a real key-pinned gate or C1's mitigation is fiction.
+- NEW-HIGH-1 (PARTIAL): identity-key TOFU pinning + change detection now
+  implemented (message_service._checkAndPinIdentity / decideIdentityPin,
+  SecureDatabase.updateConversationKey, DecryptedMessage.senderKeyChanged;
+  unit-tested). Pins the peer's session identity key on first contact, flags
+  + marks-unverified on a later change. STILL OPEN: UI must surface
+  senderKeyChanged; first-contact trust still needs the out-of-band
+  fingerprint check (detection catches changes, not a first-contact MITM).
 - H3/H4 (reviewer decision, OPEN): move pubkeys into HKDF IKM (match
   crypto_box_seal); add in-AEAD transcript commitment (also fixes H1).
   Deliberately NOT applied unilaterally — these are construction changes.

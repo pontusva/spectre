@@ -65,13 +65,37 @@ class DecryptedMessage {
   final String plaintext;
   final DateTime timestamp;
 
+  /// True when the peer's Signal identity key DIFFERS from the one previously
+  /// pinned for this conversation (a key change since first contact). The UI
+  /// should surface this prominently and prompt re-verification: a key change
+  /// is exactly what a relay-as-CA MITM or an account takeover looks like, and
+  /// the sender certificate alone cannot distinguish it from a legitimate
+  /// reinstall. False on first contact (nothing pinned yet) and on a match.
+  final bool senderKeyChanged;
+
   const DecryptedMessage({
     required this.id,
     required this.senderId,
     required this.conversationId,
     required this.plaintext,
     required this.timestamp,
+    this.senderKeyChanged = false,
   });
+}
+
+/// Outcome of comparing a peer's current session identity key against the key
+/// pinned for their conversation. Pure decision (see
+/// [MessageService.decideIdentityPin]) so it is unit-testable without a DB.
+enum IdentityPinDecision {
+  /// Nothing pinned yet — TOFU: store the current key.
+  pinFirstUse,
+
+  /// Current key equals the pinned key — all good.
+  matched,
+
+  /// Current key DIFFERS from the pinned key — surface loudly, do not silently
+  /// re-pin. The human must re-verify the fingerprint out of band.
+  changed,
 }
 
 class _PendingSend {
@@ -420,6 +444,16 @@ class MessageService {
     // no plaintext to hand the UI.
     if (plaintext == null) return;
 
+    // TOFU-pin the peer identity key and detect a change. Best-effort: a
+    // failure here must NEVER block delivery of an already-decrypted message,
+    // so the whole thing is wrapped and defaults to "not changed".
+    var senderKeyChanged = false;
+    try {
+      senderKeyChanged = await _checkAndPinIdentity(conversationId, senderId);
+    } catch (e) {
+      _log('identity pin check failed :: ${e.runtimeType}');
+    }
+
     if (!_decryptedController.isClosed) {
       _decryptedController.add(DecryptedMessage(
         id: messageId,
@@ -427,7 +461,70 @@ class MessageService {
         conversationId: conversationId,
         plaintext: plaintext,
         timestamp: timestamp,
+        senderKeyChanged: senderKeyChanged,
       ));
+    }
+  }
+
+  /// Pure pin decision — no I/O — so it is directly unit-testable.
+  /// [storedB64] is the conversation's pinned key ('' if none yet);
+  /// [currentB64] is the peer's current session identity key.
+  static IdentityPinDecision decideIdentityPin(
+    String storedB64,
+    String currentB64,
+  ) {
+    if (storedB64.isEmpty) return IdentityPinDecision.pinFirstUse;
+    if (storedB64 == currentB64) return IdentityPinDecision.matched;
+    return IdentityPinDecision.changed;
+  }
+
+  /// TOFU-pins the peer's identity key for [conversationId] and reports whether
+  /// it CHANGED from a previously-pinned value.
+  ///
+  /// The key compared is the one libsignal pinned in the session store (via
+  /// [SessionManager.remoteIdentityKey]) — the actual ratchet identity, not the
+  /// relay-attested certificate field — so this catches a relay swapping the
+  /// peer's identity key across sessions even though the (relay-issued) cert
+  /// would still verify. The pinned value lives in the conversation row and
+  /// survives restarts, while the in-memory session does not, which is exactly
+  /// what makes cross-session change detection possible.
+  ///
+  /// On a change we mark the contact unverified (so the existing
+  /// contact-verification UI reflects it) and return true so the caller flags
+  /// the message; we deliberately do NOT silently re-pin — the human must
+  /// re-verify out of band. Returns false on first use and on a match.
+  Future<bool> _checkAndPinIdentity(
+    String conversationId,
+    String senderId,
+  ) async {
+    final key = await _sessions.remoteIdentityKey(senderId);
+    if (key == null) return false; // no session identity to pin yet
+    final currentB64 = base64Encode(key.serialize());
+
+    String stored = '';
+    for (final c in await _db.getConversations()) {
+      if (c.id == conversationId) {
+        stored = c.recipientPublicKey;
+        break;
+      }
+    }
+
+    switch (decideIdentityPin(stored, currentB64)) {
+      case IdentityPinDecision.pinFirstUse:
+        await _db.updateConversationKey(conversationId, currentB64);
+        return false;
+      case IdentityPinDecision.matched:
+        return false;
+      case IdentityPinDecision.changed:
+        _log(
+          'SECURITY: peer identity key CHANGED for ${_redactId(senderId)} '
+          '— marking unverified, prompting re-verification',
+        );
+        // Best-effort; no-op if no contact row exists for this peer yet.
+        try {
+          await _db.updateContactVerified(senderId, false);
+        } catch (_) {/* contact may not exist */}
+        return true;
     }
   }
 

@@ -292,6 +292,21 @@ class SecureDatabase extends _$SecureDatabase {
     );
   }
 
+  /// Pins (or re-pins) the peer's serialized Signal identity key for a
+  /// conversation. Used by the Sealed Sender receive path to TOFU-pin the
+  /// peer identity on first contact and to detect a later key change. Keyed
+  /// by conversation id so it updates only that row, leaving other fields
+  /// (archive state, unread count) untouched.
+  Future<int> updateConversationKey(
+    String conversationId,
+    String recipientPublicKeyB64,
+  ) {
+    return (update(conversations)..where((c) => c.id.equals(conversationId)))
+        .write(ConversationsCompanion(
+      recipientPublicKey: Value(_base64ToBytes(recipientPublicKeyB64)),
+    ));
+  }
+
   Future<List<Conversation>> getConversations() async {
     final rows = await (select(conversations)
           ..where((c) => c.isArchived.equals(false))

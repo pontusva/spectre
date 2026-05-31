@@ -61,6 +61,12 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription<DecryptedMessage>? _sub;
   bool _sending = false;
   bool _loading = true;
+  // Sticky once an inbound message reports the peer's identity key changed.
+  // A key change is exactly what a relay-as-CA MITM or an account takeover
+  // looks like, so we keep the warning visible until the user navigates away
+  // and (ideally) re-verifies the fingerprint out of band — never a transient
+  // toast they can miss.
+  bool _keyChanged = false;
   _SessionState _sessionState = _SessionState.uninitialized;
 
   String get _truncatedRecipient {
@@ -111,6 +117,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (dm.conversationId != widget.conversationId) return;
     if (!mounted) return;
     setState(() {
+      if (dm.senderKeyChanged) _keyChanged = true;
       if (_knownIds.add(dm.id)) {
         _items.add(_ChatItem(
           id: dm.id,
@@ -283,6 +290,7 @@ class _ChatScreenState extends State<ChatScreen> {
           child: Column(
             children: <Widget>[
               const _SessionMetaBar(),
+              if (_keyChanged) const _KeyChangedBanner(),
               Expanded(child: _buildList()),
               if (_sessionState == _SessionState.peerNotFound)
                 const _PeerNotFoundBanner(),
@@ -363,6 +371,57 @@ class _PeerNotFoundBanner extends StatelessWidget {
           fontSize: 12,
           letterSpacing: 1.4,
         ),
+      ),
+    );
+  }
+}
+
+/// Persistent danger banner shown when an inbound message reports the peer's
+/// Signal identity key changed since it was first pinned. Deliberately sticky
+/// and high-contrast (danger red): a key change is the signature of a MITM or
+/// account takeover, and the sender certificate alone cannot tell that apart
+/// from a legitimate reinstall — only out-of-band fingerprint re-verification
+/// can. The text steers the user to that, since the relay is untrusted.
+class _KeyChangedBanner extends StatelessWidget {
+  const _KeyChangedBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      decoration: const BoxDecoration(
+        color: SpectreColors.blackLess,
+        border: Border(
+          top: BorderSide(color: SpectreColors.redDanger, width: 1),
+          bottom: BorderSide(color: SpectreColors.redDanger, width: 1),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            SpectreIcons.warning,
+            style: SpectreTypography.mono().copyWith(
+              color: SpectreColors.redDanger,
+              fontSize: 12,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'peer identity key CHANGED — re-verify the fingerprint out of '
+              'band before trusting new messages. a change can mean a '
+              'reinstall, or an attacker on the relay.',
+              style: SpectreTypography.mono().copyWith(
+                color: SpectreColors.redDanger,
+                fontSize: 12,
+                height: 1.5,
+                letterSpacing: 0.6,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
