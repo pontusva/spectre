@@ -115,15 +115,16 @@ dart run build_runner build --delete-conflicting-outputs
 ```
 
 Then: **⚙ → copy your ID** on each device, paste it into **＋ new
-conversation** on the other, send — and **verify the safety number** before
-trusting the contact. Full step-by-step:
+conversation** on the other. Adding a peer **sends them a connection request**
+(a "wants to connect" message that lands in their **REQUESTS** inbox) — they
+**long-press → Accept**, and you're chatting. Then **verify the safety number**
+before trusting the contact. Full step-by-step:
 [`SEALED_SENDER_TEST.md`](SEALED_SENDER_TEST.md).
 
 In a chat, tap the **verification bar at the top** to open the peer screen —
 that's where you **verify the safety number** and **set a nickname** (the
-"nickname (local only)" row → **[ EDIT ]**). A peer who messages *you* first
-shows up under **REQUESTS** in the conversation list; **long-press** to Accept
-or Block.
+"nickname (local only)" row → **[ EDIT ]**). Incoming requests appear under
+**REQUESTS**; **long-press** to Accept or Block.
 
 `--dart-define=SPECTRE_RELAY_URL=ws://<host>:8080/ws` configures the relay
 endpoint; there is no hardcoded server.

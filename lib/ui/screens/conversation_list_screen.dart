@@ -102,30 +102,40 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
     );
     if (recipientId == null || recipientId.isEmpty || !mounted) return;
 
-    final all = await widget.database.getConversations();
-    Conversation? existing;
-    for (final c in all) {
-      if (c.recipientId == recipientId) {
-        existing = c;
-        break;
+    // State-agnostic lookup so re-adding a pending/blocked peer is found.
+    final existing = await widget.database.getConversationByRecipient(recipientId);
+    if (existing == null) {
+      // New peer: send a connection request now (establishes the session and
+      // sends a canned first message that lands in their Requests inbox).
+      final status = await widget.messageService.sendInvitation(recipientId);
+      if (!mounted) return;
+      if (status == MessageStatus.failed) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'could not send request — peer not reachable or not registered yet'),
+            duration: Duration(seconds: 3),
+          ),
+        );
       }
     }
+    await _load();
+    if (!mounted) return;
 
-    final Conversation conversation;
-    if (existing != null) {
-      conversation = existing;
-    } else {
-      final id = _uuid.v4();
+    // Open the conversation (created by the invitation, or pre-existing). Fall
+    // back to a local row if the invite couldn't create one (peer unreachable)
+    // so the user still lands in the chat and can retry from there.
+    var conversation =
+        await widget.database.getConversationByRecipient(recipientId);
+    if (conversation == null) {
       conversation = Conversation(
-        id: id,
+        id: _uuid.v4(),
         recipientId: recipientId,
         recipientPublicKey: '',
         lastMessageAt: null,
       );
       await widget.database.insertConversation(conversation);
     }
-    await _load();
-    if (!mounted) return;
     widget.onOpenConversation(conversation);
   }
 

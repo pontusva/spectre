@@ -274,6 +274,33 @@ class MessageService {
     }
   }
 
+  /// Canned body for a connection request — the first message sent when you
+  /// add a peer, so they get a request in their inbox without you typing.
+  static const String invitationBody = 'wants to connect';
+
+  /// Sends a connection request to [recipientId]: establishes the Signal
+  /// session if needed (fetching the peer's prekey bundle), then sends the
+  /// canned [invitationBody] — which lands in their Requests inbox as the
+  /// first message. Returns [MessageStatus.failed] if the peer has no prekey
+  /// bundle on the relay (never registered / not reachable) so the caller can
+  /// surface that; otherwise the normal send status.
+  Future<MessageStatus> sendInvitation(String recipientId) async {
+    if (_wiped) {
+      throw StateError('MessageService has been wiped');
+    }
+    if (!await _sessions.hasSession(recipientId)) {
+      try {
+        final bundle = await _prekeyService.fetchBundle(recipientId);
+        if (bundle == null) return MessageStatus.failed; // not registered
+        await _sessions.initializeSession(recipientId, bundle);
+      } catch (e) {
+        _log('invitation session init failed :: ${e.runtimeType}');
+        return MessageStatus.failed;
+      }
+    }
+    return sendMessage(recipientId, invitationBody);
+  }
+
   /// Builds the on-wire form for [innerCtB64] and hands it to the relay.
   /// Throws on any failure (relay offline, no session identity, no sender
   /// certificate, seal error) so the caller queues for retry. Critically, the

@@ -410,6 +410,11 @@ CHANGED (registry above predates these):
 - Contacts are now created/pinned on the SEND path too (not just receive), so an
   outbound-only conversation has a fingerprint to verify and a contact to
   nickname. (Was: nicknames/verification only worked after receiving.)
+- Adding a peer (＋ new conversation) now SENDS a connection request:
+  MessageService.sendInvitation establishes the session + sends a canned
+  "wants to connect" first message, so it reaches the peer's Requests inbox
+  without the user typing. (Was: adding only opened a local chat; nothing went
+  out until you wrote.)
 - Tests: contacts_requests_test (peerLabel, nextStateOnOutbound, shouldDropInbound,
   Conversation round-trip). 24 client tests green.
 
