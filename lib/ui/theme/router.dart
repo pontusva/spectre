@@ -101,6 +101,9 @@ GoRouter buildSpectreRouter({required SpectreServices services}) {
                   extra: RouteExtras(services: svc, conversation: c),
                 );
               },
+              onOpenSettings: () {
+                ctx.push('/settings', extra: RouteExtras(services: svc));
+              },
               onWiped: svc.onWiped,
             ),
           );

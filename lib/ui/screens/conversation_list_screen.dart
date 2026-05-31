@@ -16,6 +16,7 @@ class ConversationListScreen extends StatefulWidget {
     required this.database,
     required this.currentUserId,
     required this.onOpenConversation,
+    required this.onOpenSettings,
     this.onWiped,
   });
 
@@ -23,6 +24,7 @@ class ConversationListScreen extends StatefulWidget {
   final SecureDatabase database;
   final String currentUserId;
   final void Function(Conversation conversation) onOpenConversation;
+  final VoidCallback onOpenSettings;
   final VoidCallback? onWiped;
 
   @override
@@ -179,6 +181,12 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
           ],
         ),
         actions: <Widget>[
+          IconButton(
+            tooltip: 'settings · your ID',
+            onPressed: _wiping ? null : widget.onOpenSettings,
+            icon: const Icon(Icons.settings_outlined,
+                color: SpectreColors.textCold, size: 22),
+          ),
           IconButton(
             tooltip: 'panic wipe',
             onPressed: _wiping ? null : _confirmAndWipe,
