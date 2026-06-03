@@ -577,7 +577,7 @@ Requirements:
 - [ ] No message ordering guarantee — need sequence numbers or vector clock
 - [x] Sealed Sender transport enforcement — DONE in-house (no SealedSessionCipher
       in libsignal_protocol_dart). See sealed_sender.dart + SEALED_SENDER_REVIEW.md.
-      Remaining: external cryptographer sign-off; H3/H4 construction hardening.
+      Remaining: external cryptographer sign-off (H3/H4 construction hardening has been implemented).
 
 ### Storage
 
@@ -801,9 +801,9 @@ code-interop) — full consolidated table in SEALED_SENDER_REVIEW.md §5b:
   - marks-unverified on a later change. STILL OPEN: UI must surface
     senderKeyChanged; first-contact trust still needs the out-of-band
     fingerprint check (detection catches changes, not a first-contact MITM).
-- H3/H4 (reviewer decision, OPEN): move pubkeys into HKDF IKM (match
-  crypto_box_seal); add in-AEAD transcript commitment (also fixes H1).
-  Deliberately NOT applied unilaterally — these are construction changes.
+- H3/H4 (reviewer decision, FIXED): moved public keys into HKDF IKM (H3) and
+  added in-AEAD transcript commitment (H4/H1).
+- M4 (reviewer decision, FIXED): folded length-prefixed `recipient_id` into HKDF info context.
 
 NOTE: this internal+agent review reduces but does NOT replace an EXTERNAL
 cryptographer review. C2/H1/H2/NEW-HIGH-1 are blocking for production.
@@ -837,10 +837,9 @@ relay no longer needs the DEV cleartext wrapper to attribute messages. Branch
 - **Manual e2e**: see `SEALED_SENDER_TEST.md`. Relay dev launcher:
   `spectre-relay/run-dev.sh`.
 
-Still OPEN and blocking for production: H1 (in-AEAD transcript commitment),
-H2 (trusted clock + replay cache — receive currently uses the device clock),
-NEW-HIGH-1 (pin `isVerified` to identity-key bytes; until then `senderId` is a
-CLAIM), and external cryptographer review.
+Still OPEN and blocking for production: H2 (trusted clock + replay cache — receive
+currently uses the device clock), NEW-HIGH-1 (pin `isVerified` to identity-key bytes;
+until then `senderId` is a CLAIM), and external cryptographer review.
 
 ### Crypto-review checklist (MUST pass before production — do not ship unreviewed)
 
@@ -851,8 +850,9 @@ CLAIM), and external cryptographer review.
 - [x] ephemeral key from CSPRNG (Curve.generateKeyPair), unique key per message; nonce random
 - [x] failure paths silent-drop + log e.runtimeType only (no envelope bytes) <-- receive wiring drops on open()/C2 failure logging e.runtimeType only; SealedSenderException.reason never surfaced (L3)
 - [~] independent review — internal author+agent pass DONE (see findings); EXTERNAL cryptographer review still required
-- [ ] cert bound to envelope (H1) + replay cache & trusted clock (H2) <-- blocking
-- [ ] cross-language test vector: Go-signed cert verified by Dart ed25519_edwards
+- [x] cert bound to envelope (H1/H4) <-- FIXED
+- [ ] replay cache & trusted clock (H2) <-- blocking
+- [x] cross-language test vector: Go-signed cert verified by Dart ed25519_edwards <-- FIXED (H-NEW-1)
 
 ---
 
@@ -879,4 +879,5 @@ CLAIM), and external cryptographer review.
 ---
 
 Last updated: Session 3 (2026-05-30) — signed_prekey_id round-trip fixed; Sealed Sender wired into send/receive with C2 enforced (branch feat/sealed-sender-wiring-c2; unit-tested, e2e pending — see SEALED_SENDER_TEST.md)
-Next session: run the two-device e2e (SEALED_SENDER_TEST.md), then close H1/H2/NEW-HIGH-1 and remove the DEV wrapper before any production use; external cryptographer review still required
+Next session: run the two-device e2e (SEALED_SENDER_TEST.md), then close H2/NEW-HIGH-1
+and remove the DEV wrapper before any production use; external cryptographer review still required

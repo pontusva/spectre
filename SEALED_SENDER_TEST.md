@@ -100,10 +100,10 @@ flutter run -d <device> --dart-define=SPECTRE_RELAY_URL=ws://<relay-host>:8080/w
   and C2 blocks re-stapling.
 - **NEW-HIGH-1** (verification): real now — key pinned to identity-key bytes,
   change surfaced (banner), out-of-band verify reachable.
-- Still open: an **external cryptographer review** (the gate), the **H3/H4**
-  construction-hardening calls (reviewer's decision), and a separate
+- Still open: an **external cryptographer review** (the gate) and a separate
   **anonymous upload channel** (sealed blobs still go over the authenticated WS,
-  so the relay can correlate the sender at the TCP layer). See
+  so the relay can correlate the sender at the TCP layer). The **H3/H4**
+  construction-hardening recommendations have been fully implemented. See
   `SEALED_SENDER_REVIEW.md`.
 
 These (esp. the external review) MUST be resolved before any production use.
