@@ -2,20 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- DEV ONLY — local two-device testing against a cleartext ws:// relay on
-	     the LAN. NSAllowsLocalNetworking permits connections to private-range
-	     hosts WITHOUT disabling App Transport Security globally (unlike
-	     NSAllowsArbitraryLoads). REMOVE before production: a deployed relay uses
-	     wss:// (TLS) and needs no ATS exception. -->
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
-	</dict>
-	<!-- iOS 14+ requires this to access the local network (and shows the user a
-	     one-time permission prompt). Without it the LAN relay is unreachable. -->
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Spectre connects to a relay on your local network for development testing.</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
@@ -40,6 +26,13 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Spectre connects to a relay on your local network for development testing.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
