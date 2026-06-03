@@ -79,6 +79,47 @@ identity as unconfirmed.
 
 ---
 
+## Visual Walkthrough
+
+### 1. Onboarding & Identity Generation
+During the first launch, Spectre guides you through a secure, self-contained onboarding process to create your identity keys locally on your device.
+
+| Boot / Decryption | Generating Identity | Identity Generated |
+|:---:|:---:|:---:|
+| ![Boot Screen](images/boot_screen.png) | ![Generating Identity](images/onboarding_1_generating_identity.png) | ![Identity Generated](images/onboarding_2_identity_generated.png) |
+| *App initialization & DB decryption* | *Gathering entropy & seeding CSPRNG* | *Randomized identity creation* |
+
+| Protocol Details | Fingerprint Verification |
+|:---:|:---:|
+| ![Protocol Details](images/onboarding_3_protocol_info.png) | ![Fingerprint Verification](images/onboarding_4_fingerprint_verification.png) |
+| *E2EE & self-decay concepts overview* | *BIP-39 out-of-band verification* |
+
+### 2. Conversation & Sessions Dashboard
+Manage your encrypted chats without leaving any metadata trace on the relay.
+
+| Empty Sessions List | Active Conversations |
+|:---:|:---:|
+| ![Empty Dashboard](images/session_list_empty.png) | ![Active Sessions](images/session_list_active.png) |
+| *Clean state when no sessions exist* | *Active chat session list with preview* |
+
+### 3. Settings & Security Control
+Configure your profile, view credentials, manage connection settings, or trigger a local panic wipe.
+
+| Identity Settings | Security & Privacy | About Spectre |
+|:---:|:---:|:---:|
+| ![Identity Settings](images/settings_identity.png) | ![Security Settings](images/settings_security.png) | ![About Screen](images/settings_about.png) |
+| *Manage display names & prekeys* | *Configure Tor and disappearing messages* | *Version details & license info* |
+
+### 4. Panic Wipe
+A core feature of Spectre is the ability to instantly and irreversibly destroy all local data.
+
+| Panic Wipe Dialog |
+|:---:|
+| ![Panic Wipe Confirmation](images/panic_wipe_confirmation.png) |
+| *Confirmation prompt before purging all keys, identity, and messages from SQLCipher* |
+
+---
+
 ## Repo layout
 
 ```
