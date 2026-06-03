@@ -581,7 +581,7 @@ Requirements:
 
 ### Storage
 
-- [ ] VACUUM during wipe on main thread — move to background isolate
+- [x] VACUUM during wipe on main thread — REMOVED (prevent same-isolate deadlock with active UI stream queries; redundant with zero-overwrite + key deletion)
 - [ ] ON DELETE CASCADE direction — verify conversations -> messages
 - [ ] Key never logged — lint/comment warning for debug builds
 - [ ] expiresAt UTC consistency

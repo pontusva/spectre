@@ -562,7 +562,7 @@ class RelayService {
     await _channelSub?.cancel();
     _channelSub = null;
     try {
-      await _channel?.sink.close(ws_status.normalClosure);
+      unawaited(_channel?.sink.close(ws_status.normalClosure).catchError((_) {}));
     } catch (_) {
       // Best effort — the underlying socket may already be gone.
     }
@@ -602,7 +602,7 @@ class RelayService {
     } catch (_) {/* ignore */}
     _channelSub = null;
     try {
-      await _channel?.sink.close(ws_status.goingAway);
+      unawaited(_channel?.sink.close(ws_status.goingAway).catchError((_) {}));
     } catch (_) {/* ignore */}
     _channel = null;
     _authCompleter = null;

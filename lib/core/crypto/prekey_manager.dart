@@ -281,25 +281,11 @@ class PreKeyManager {
   /// Wipes every prekey and signed-prekey record. Part of the panic-wipe
   /// flow — call alongside [IdentityManager.wipeIdentity].
   Future<void> wipeAll() async {
-    final ids = await _readPreKeyIndex();
-    for (final id in ids) {
-      await _storage.delete(key: '$_kPreKeyPrefix$id');
-    }
-    await _storage.delete(key: _kPreKeyIndex);
-    await _storage.delete(key: _kPreKeyNextId);
-
-    final curId = await _storage.read(key: _kSignedPreKeyCurId);
-    final prevId = await _storage.read(key: _kSignedPreKeyPrevId);
-    if (curId != null) {
-      await _storage.delete(key: '$_kSignedPreKeyPrefix$curId');
-    }
-    if (prevId != null) {
-      await _storage.delete(key: '$_kSignedPreKeyPrefix$prevId');
-    }
-    await _storage.delete(key: _kSignedPreKeyCurId);
-    await _storage.delete(key: _kSignedPreKeyPrevId);
-    await _storage.delete(key: _kSignedPreKeyNextId);
-    await _storage.delete(key: _kSignedPreKeyRotatedAt);
+    // Using deleteAll() is a scorched-earth operation that clears all keys from
+    // secure storage in a single fast call. This prevents executing 100+ separate
+    // delete operations sequentially, which blocks the UI thread and causes
+    // macOS/iOS Keychain connection timeouts.
+    await _storage.deleteAll();
   }
 
   // ---------------------------------------------------------------------

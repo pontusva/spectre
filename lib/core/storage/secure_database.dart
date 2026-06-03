@@ -531,8 +531,13 @@ class SecureDatabase extends _$SecureDatabase {
         await delete(conversations).go();
         await delete(contacts).go();
       });
-      // VACUUM cannot run inside a transaction.
-      await customStatement('VACUUM');
+      // We do not run VACUUM here because it requires an EXCLUSIVE lock on the
+      // database file. If there are active stream queries (watchers) still
+      // subscribed (e.g. from screens in the navigation stack), they will hold
+      // a SHARED lock. Since SQLite/Drift is same-isolate (main UI thread),
+      // blocking on VACUUM waiting for those locks to release would deadlock
+      // the event loop forever. Since the database file is zero-overwritten
+      // and deleted immediately after close below anyway, VACUUM is redundant.
     } catch (_) {
       // Even if scrubbing fails (corrupted DB, locked file, etc.) we
       // continue to file deletion and key destruction below. Failing
