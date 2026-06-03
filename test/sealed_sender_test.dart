@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:ed25519_edwards/ed25519_edwards.dart' as ed;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
@@ -295,5 +296,137 @@ void main() {
       () => SealedSender(caPublicKey: Uint8List(31)),
       throwsA(isA<SealedSenderException>()),
     );
+  });
+
+  group('Transcript and Key Commitment verification (H4)', () {
+    final aead = Chacha20.poly1305Aead();
+    final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+
+    Future<Uint8List> deriveKeyHelper(
+      Uint8List dh,
+      Uint8List ephPub,
+      Uint8List recipPub,
+      String recipId,
+    ) async {
+      final ikm = Uint8List(dh.length + ephPub.length + recipPub.length)
+        ..setAll(0, dh)
+        ..setAll(dh.length, ephPub)
+        ..setAll(dh.length + ephPub.length, recipPub);
+      final salt = Uint8List(32);
+      final idBytes = utf8.encode(recipId);
+      final info = BytesBuilder(copy: false)
+        ..add(utf8.encode('spectre-sealed-sender-v1'))
+        ..addByte(idBytes.length)
+        ..add(idBytes);
+      final derived = await hkdf.deriveKey(
+        secretKey: SecretKey(ikm),
+        nonce: salt,
+        info: info.toBytes(),
+      );
+      return Uint8List.fromList(await derived.extractBytes());
+    }
+
+    test('mismatched recipient id commitment in plaintext is rejected', () async {
+      final now = 1_700_000_000_000;
+      final cert = makeCert(uid: senderUid, ikRaw: senderIkRaw, expMs: now + 3600 * 1000);
+
+      final ephemeral = Curve.generateKeyPair();
+      final ephPubRaw = rawPub(ephemeral.publicKey);
+      final recipPubRaw = rawPub(recipientKp.publicKey);
+
+      final dh = Curve.calculateAgreement(recipientKp.publicKey, ephemeral.privateKey);
+      final keyBytes = await deriveKeyHelper(dh, ephPubRaw, recipPubRaw, recipientUid);
+
+      // Create a payload where the recipient ID in AAD matches recipientUid,
+      // but the inner commitment field 'recip_id' is tampered/mismatched.
+      final badInner = utf8.encode(jsonEncode(<String, Object>{
+        'cert': base64Encode(cert.bytes),
+        'cert_sig': base64Encode(cert.sig),
+        'ct': innerCt,
+        'eph_pub': base64Encode(ephPubRaw),
+        'recip_id': 'someone-else', // mismatched commitment
+      }));
+
+      final nonce = aead.newNonce();
+      final box = await aead.encrypt(
+        badInner,
+        secretKey: SecretKey(keyBytes),
+        nonce: nonce,
+        aad: utf8.encode(recipientUid), // valid AAD to pass outer decryption
+      );
+
+      final blob = (BytesBuilder(copy: false)
+        ..add(ephPubRaw)
+        ..add(nonce)
+        ..add(box.cipherText)
+        ..add(box.mac.bytes)).toBytes();
+
+      expect(
+        () => ss.open(
+          ownIdentityKeyPair: recipientIdentity,
+          blob: blob,
+          recipientId: recipientUid,
+          nowMs: now,
+        ),
+        throwsA(
+          isA<SealedSenderException>().having(
+            (e) => e.reason,
+            'reason',
+            contains('recipient id commitment mismatch'),
+          ),
+        ),
+      );
+    });
+
+    test('mismatched ephemeral key commitment in plaintext is rejected', () async {
+      final now = 1_700_000_000_000;
+      final cert = makeCert(uid: senderUid, ikRaw: senderIkRaw, expMs: now + 3600 * 1000);
+
+      final ephemeral = Curve.generateKeyPair();
+      final ephPubRaw = rawPub(ephemeral.publicKey);
+      final recipPubRaw = rawPub(recipientKp.publicKey);
+
+      final dh = Curve.calculateAgreement(recipientKp.publicKey, ephemeral.privateKey);
+      final keyBytes = await deriveKeyHelper(dh, ephPubRaw, recipPubRaw, recipientUid);
+
+      // Create a payload where the inner commitment field 'eph_pub' is mismatched.
+      final badInner = utf8.encode(jsonEncode(<String, Object>{
+        'cert': base64Encode(cert.bytes),
+        'cert_sig': base64Encode(cert.sig),
+        'ct': innerCt,
+        'eph_pub': base64Encode(Uint8List(32)), // mismatched commitment
+        'recip_id': recipientUid,
+      }));
+
+      final nonce = aead.newNonce();
+      final box = await aead.encrypt(
+        badInner,
+        secretKey: SecretKey(keyBytes),
+        nonce: nonce,
+        aad: utf8.encode(recipientUid),
+      );
+
+      final blob = (BytesBuilder(copy: false)
+        ..add(ephPubRaw)
+        ..add(nonce)
+        ..add(box.cipherText)
+        ..add(box.mac.bytes)).toBytes();
+
+      expect(
+        () => ss.open(
+          ownIdentityKeyPair: recipientIdentity,
+          blob: blob,
+          recipientId: recipientUid,
+          nowMs: now,
+        ),
+        throwsA(
+          isA<SealedSenderException>().having(
+            (e) => e.reason,
+            'reason',
+            contains('ephemeral key commitment mismatch'),
+          ),
+        ),
+      );
+    });
   });
 }

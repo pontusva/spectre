@@ -114,7 +114,11 @@ class SealedSender {
         ephemeral.privateKey,
       );
       keyBytes = await _deriveKey(
-          dh: dh, ephPubRaw: ephPubRaw, recipPubRaw: recipPubRaw);
+        dh: dh,
+        ephPubRaw: ephPubRaw,
+        recipPubRaw: recipPubRaw,
+        recipientId: recipientId,
+      );
     } catch (_) {
       throw const SealedSenderException('seal key agreement failed');
     }
@@ -123,6 +127,8 @@ class SealedSender {
       'cert': base64Encode(certBytes),
       'cert_sig': base64Encode(certSignature),
       'ct': innerCiphertextB64,
+      'eph_pub': base64Encode(ephPubRaw),
+      'recip_id': recipientId,
     }));
 
     final nonce = _aead.newNonce(); // CSPRNG, length _kNonceLen
@@ -184,8 +190,12 @@ class SealedSender {
       final ownPrivate = ownIdentityKeyPair.getPrivateKey();
       final ownPubRaw = _rawPub(ownIdentityKeyPair.getPublicKey().publicKey);
       final dh = Curve.calculateAgreement(ephPub, ownPrivate);
-      final keyBytes =
-          await _deriveKey(dh: dh, ephPubRaw: ephPubRaw, recipPubRaw: ownPubRaw);
+      final keyBytes = await _deriveKey(
+        dh: dh,
+        ephPubRaw: ephPubRaw,
+        recipPubRaw: ownPubRaw,
+        recipientId: recipientId,
+      );
       innerBytes = await _aead.decrypt(
         SecretBox(cipherText, nonce: nonce, mac: Mac(mac)),
         secretKey: SecretKey(keyBytes),
@@ -205,8 +215,22 @@ class SealedSender {
     final certB64 = inner['cert'];
     final certSigB64 = inner['cert_sig'];
     final ct = inner['ct'];
-    if (certB64 is! String || certSigB64 is! String || ct is! String) {
+    final ephPubCommitB64 = inner['eph_pub'];
+    final recipIdCommit = inner['recip_id'];
+
+    if (certB64 is! String ||
+        certSigB64 is! String ||
+        ct is! String ||
+        ephPubCommitB64 is! String ||
+        recipIdCommit is! String) {
       throw const SealedSenderException('inner fields missing');
+    }
+
+    if (recipIdCommit != recipientId) {
+      throw const SealedSenderException('recipient id commitment mismatch');
+    }
+    if (ephPubCommitB64 != base64Encode(ephPubRaw)) {
+      throw const SealedSenderException('ephemeral key commitment mismatch');
     }
 
     final cert = _verifyCertificate(
@@ -281,16 +305,29 @@ class SealedSender {
     required Uint8List dh,
     required Uint8List ephPubRaw,
     required Uint8List recipPubRaw,
+    required String recipientId,
   }) async {
-    // Salt binds the ephemeral key and the recipient identity into the KDF
-    // so a derived key is unusable outside this exact (eph, recipient) pair.
-    final salt = Uint8List(ephPubRaw.length + recipPubRaw.length)
-      ..setAll(0, ephPubRaw)
-      ..setAll(ephPubRaw.length, recipPubRaw);
+    // Bind DH output and public keys directly into IKM (H3)
+    final ikm = Uint8List(dh.length + ephPubRaw.length + recipPubRaw.length)
+      ..setAll(0, dh)
+      ..setAll(dh.length, ephPubRaw)
+      ..setAll(dh.length + ephPubRaw.length, recipPubRaw);
+
+    // Standard HKDF salt is fixed/non-secret (here 32 zero-bytes)
+    final salt = Uint8List(32);
+
+    // Fold length-prefixed recipient ID into HKDF info context (M4)
+    final idBytes = utf8.encode(recipientId);
+    final infoBuilder = BytesBuilder(copy: false)
+      ..add(utf8.encode(_kInfo))
+      ..addByte(idBytes.length)
+      ..add(idBytes);
+    final info = infoBuilder.toBytes();
+
     final derived = await _hkdf.deriveKey(
-      secretKey: SecretKey(dh),
+      secretKey: SecretKey(ikm),
       nonce: salt,
-      info: utf8.encode(_kInfo),
+      info: info,
     );
     return Uint8List.fromList(await derived.extractBytes());
   }
