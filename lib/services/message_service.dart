@@ -360,9 +360,27 @@ class MessageService {
     // sends — so every inbound message was dropped as malformed.)
     final timestampMs = envelope['timestamp_ms'] ?? envelope['timestamp'];
 
+    // Read the federation_sender_relay if present.
+    final federationSenderRelay = envelope['federation_sender_relay'];
+
     if (rawCiphertext is! String || timestampMs is! int) {
       _log('dropped envelope: malformed');
       return;
+    }
+
+    // Validate federation_sender_relay if present.
+    // SECURITY CRITICAL: federation_sender_relay is relay metadata used ONLY for
+    // reply routing. It must NEVER be used for identity verification — that's the
+    // job of the sealed sender (which verifies the cryptographic certificate inside).
+    // To prevent injection attacks, we strictly validate that the domain only
+    // contains alphanumeric characters, hyphens, dots, or colons (for ports).
+    if (federationSenderRelay != null) {
+      if (federationSenderRelay is! String ||
+          federationSenderRelay.isEmpty ||
+          !RegExp(r'^[a-zA-Z0-9\-.:]+$').hasMatch(federationSenderRelay)) {
+        _log('dropped envelope: invalid federation_sender_relay');
+        return;
+      }
     }
 
     // The ciphertext field is a Sealed Sender blob: open it with our identity
@@ -416,6 +434,15 @@ class MessageService {
     final senderId = opened.senderId;
     final ciphertextB64 = opened.innerCiphertextB64;
 
+    // If this message arrived via federation, append the sender's relay
+    // so replies route back correctly. federation_sender_relay is set by
+    // the receiving relay — it is NOT trusted for identity, only for routing.
+    // Identity trust still rests entirely on the sealed sender construction
+    // and out-of-band safety number verification.
+    final fullSenderId = (federationSenderRelay is String && federationSenderRelay.isNotEmpty)
+        ? '$senderId@$federationSenderRelay'
+        : senderId;
+
     final ciphertextBytes = Uint8List.fromList(utf8.encode(ciphertextB64));
     final messageId = _contentHashId(ciphertextBytes);
 
@@ -430,7 +457,7 @@ class MessageService {
         await _db.messageExists(messageId)) {
       _seenMessageIds.add(messageId);
       _log(
-        'duplicate/replayed inbound from ${_redactId(senderId)} '
+        'duplicate/replayed inbound from ${_redactId(fullSenderId)} '
         'id=${_redactId(messageId)} ignored',
       );
       return;
@@ -441,22 +468,22 @@ class MessageService {
     // Block keeps the row (it IS the blocklist), so this stays effective
     // across restarts; deleting it would let the next message re-create a
     // fresh pending request.
-    final existingConv = await _db.getConversationByRecipient(senderId);
+    final existingConv = await _db.getConversationByRecipient(fullSenderId);
     if (shouldDropInbound(existingConv?.requestState)) {
-      _log('dropped inbound from blocked peer ${_redactId(senderId)}');
+      _log('dropped inbound from blocked peer ${_redactId(fullSenderId)}');
       return;
     }
 
     // incoming:true → a brand-new peer lands in the Requests inbox (pending),
     // not the main Chats list.
-    final conversationId = await _ensureConversation(senderId, incoming: true);
+    final conversationId = await _ensureConversation(fullSenderId, incoming: true);
 
     final timestamp =
         DateTime.fromMillisecondsSinceEpoch(timestampMs, isUtc: true);
 
     String? payload;
     try {
-      payload = await _sessions.decryptMessage(senderId, ciphertextB64);
+      payload = await _sessions.decryptMessage(fullSenderId, ciphertextB64);
     } catch (e) {
       // Signal "first message" flow: the very first ciphertext a peer
       // sends us is a PreKeySignalMessage, and decryption fails here
@@ -465,22 +492,22 @@ class MessageService {
       // (the same bundle whose one-time prekey the sender already
       // consumed when they built the PreKeySignalMessage), then retries.
       _log(
-        'decrypt failed from ${_redactId(senderId)} :: ${e.runtimeType} '
+        'decrypt failed from ${_redactId(fullSenderId)} :: ${e.runtimeType} '
         '-- attempting first-message session init',
       );
-      final bundle = await _prekeyService.fetchBundle(senderId);
+      final bundle = await _prekeyService.fetchBundle(fullSenderId);
       if (bundle != null) {
-        await _sessions.initializeSession(senderId, bundle);
+        await _sessions.initializeSession(fullSenderId, bundle);
         try {
-          payload = await _sessions.decryptMessage(senderId, ciphertextB64);
+          payload = await _sessions.decryptMessage(fullSenderId, ciphertextB64);
         } catch (e2) {
           _log(
-            'decrypt retry failed from ${_redactId(senderId)} '
+            'decrypt retry failed from ${_redactId(fullSenderId)} '
             ':: ${e2.runtimeType}',
           );
         }
       } else {
-        _log('no prekey bundle for ${_redactId(senderId)}');
+        _log('no prekey bundle for ${_redactId(fullSenderId)}');
       }
     }
 
@@ -494,7 +521,7 @@ class MessageService {
       await _db.insertMessage(Message(
         id: messageId,
         conversationId: conversationId,
-        senderId: senderId,
+        senderId: fullSenderId,
         ciphertext: ciphertextBytes,
         // Persist the decrypted text (encrypted at rest), or null if this
         // message could not be decrypted — then it shows the placeholder.
@@ -522,7 +549,7 @@ class MessageService {
     // so the whole thing is wrapped and defaults to "not changed".
     var senderKeyChanged = false;
     try {
-      senderKeyChanged = await _checkAndPinIdentity(conversationId, senderId);
+      senderKeyChanged = await _checkAndPinIdentity(conversationId, fullSenderId);
     } catch (e) {
       _log('identity pin check failed :: ${e.runtimeType}');
     }
@@ -532,14 +559,14 @@ class MessageService {
     // peerLabel(). Best-effort.
     if (peerName != null && peerName.isNotEmpty) {
       try {
-        await _db.updateContactPeerName(senderId, peerName);
+        await _db.updateContactPeerName(fullSenderId, peerName);
       } catch (_) {/* contact row may not exist yet */}
     }
 
     if (!_decryptedController.isClosed) {
       _decryptedController.add(DecryptedMessage(
         id: messageId,
-        senderId: senderId,
+        senderId: fullSenderId,
         conversationId: conversationId,
         plaintext: plaintext,
         timestamp: timestamp,

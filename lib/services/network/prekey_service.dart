@@ -162,12 +162,13 @@ Uri _httpUrlFor(String recipientId) {
     final username = recipientId.substring(0, atIndex);
     final domain = recipientId.substring(atIndex + 1);
     // domain may be host or host:port
+    final hasPort = domain.contains(':');
     final uri = Uri.tryParse('http://$domain');
     if (uri != null) {
       return Uri(
         scheme: scheme,
         host: uri.host,
-        port: uri.port > 0 ? uri.port : null,
+        port: hasPort ? uri.port : null,
         path: '/prekeys/$username',
       );
     }
