@@ -197,6 +197,7 @@ class IdentityManager {
     await _storage.delete(key: _kRegistrationId);
     await _storage.delete(key: _kUserId);
     await _storage.delete(key: _kDisplayName);
+    await _storage.delete(key: 'spectre.sealed_ca_pub');
 
     // Zero out in-memory references. Dart strings are immutable so we can't
     // actually scrub the bytes — the best we can do is drop references and

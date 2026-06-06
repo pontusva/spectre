@@ -368,6 +368,8 @@ class MessageService {
       return;
     }
 
+    _log('receiveMessage envelope keys: ${envelope.keys} recipient_id: ${envelope['recipient_id']} federation_sender_relay: ${envelope['federation_sender_relay']}');
+
     // Validate federation_sender_relay if present.
     // SECURITY CRITICAL: federation_sender_relay is relay metadata used ONLY for
     // reply routing. It must NEVER be used for identity verification — that's the
@@ -405,7 +407,7 @@ class MessageService {
     final envelopeRecipientId = envelope['recipient_id'];
     final recipientId = (envelopeRecipientId is String &&
             envelopeRecipientId.isNotEmpty &&
-            RegExp(r'^[a-zA-Z0-9\-.:@]+$').hasMatch(envelopeRecipientId))
+            RegExp(r'^[a-zA-Z0-9_\-.:@]+$').hasMatch(envelopeRecipientId))
         ? envelopeRecipientId
         : identity.userId;
 
@@ -423,7 +425,7 @@ class MessageService {
     } catch (e) {
       // Any malformed/forged/expired sealed envelope. Fail closed; log the
       // runtime type only, never the blob bytes or cert fields.
-      _log('dropped sealed envelope :: ${e.runtimeType}');
+      _log('dropped sealed envelope :: $e');
       return;
     }
     // C2: bind the certified sender identity to the identity key inside a
