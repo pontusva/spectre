@@ -402,12 +402,19 @@ class MessageService {
       return;
     }
     final identity = await _identity.loadOrCreate();
+    final envelopeRecipientId = envelope['recipient_id'];
+    final recipientId = (envelopeRecipientId is String &&
+            envelopeRecipientId.isNotEmpty &&
+            RegExp(r'^[a-zA-Z0-9\-.:@]+$').hasMatch(envelopeRecipientId))
+        ? envelopeRecipientId
+        : identity.userId;
+
     final OpenedSealed opened;
     try {
       opened = await sealed.open(
         ownIdentityKeyPair: identity.identityKeyPair,
         blob: blob,
-        recipientId: identity.userId,
+        recipientId: recipientId,
         // H2: replay is guarded below by the persistent message-id dedup.
         // Remaining minor follow-up — expiry trusts the device clock (no
         // trusted offline time source); acceptable, documented in review.

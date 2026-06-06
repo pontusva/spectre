@@ -218,17 +218,21 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       await widget.sessionManager
           .initializeSession(widget.recipientId, bundle);
+          // ignore: avoid_print
+  print('session init ok for: ' + widget.recipientId);
       if (mounted) {
         setState(() => _sessionState = _SessionState.ready);
       }
       return true;
-    } catch (_) {
+    } catch (e) {
       // Any other failure — network, malformed bundle, libsignal
       // rejection of the signed-prekey signature — we treat as
       // transient. The user can retry by sending again. We
       // deliberately do NOT surface the underlying exception class
       // to the UI: a "signature rejected" error vs. "network down"
       // error would be a verification oracle for a hostile relay.
+      // ignore: avoid_print
+  print('session init error: ' + e.toString());
       if (mounted) {
         setState(() => _sessionState = _SessionState.transientError);
       }
