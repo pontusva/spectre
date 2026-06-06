@@ -70,14 +70,9 @@ class SealedSender {
   final Cipher _aead = Chacha20.poly1305Aead();
   final Hkdf _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
 
-  /// The relay's sealed-sender CA public key (raw 32-byte Ed25519), pinned
-  /// by the caller on first fetch from `GET /sealed-ca`. Used ONLY to verify
-  /// sender certificates. If this is wrong/spoofed, certificate verification
-  /// fails closed and no sender id is ever trusted.
-  final ed.PublicKey _caPublicKey;
+  // Removed _caPublicKey pinning to allow dynamic CA key resolution per issuer.
 
-  SealedSender({required Uint8List caPublicKey})
-      : _caPublicKey = ed.PublicKey(_requireLen(caPublicKey, 32, 'CA pubkey'));
+  SealedSender();
 
   /// Builds the outer sealed envelope.
   ///
@@ -150,23 +145,46 @@ class SealedSender {
     return builder.toBytes();
   }
 
-  /// Recipient-side unwrap. Decrypts the outer envelope with our identity
-  /// private key, verifies the embedded sender certificate against the
-  /// pinned CA key and its expiry, and returns the authenticated sender id
-  /// plus the inner Double-Ratchet ciphertext.
-  ///
-  /// [ownIdentityKeyPair] — this device's Signal identity keypair.
-  /// [blob] — the bytes from `SealedEnvelope.ciphertext`.
-  /// [recipientId] — OUR relay handle; must equal the AAD the sender used.
-  /// [nowMs] — current unix time in ms, for expiry checks (injected for
-  ///   testability).
-  ///
-  /// Throws [SealedSenderException] on any malformed/forged/expired input.
-  Future<OpenedSealed> open({
+  /// Unwraps the outer envelope and parses the unverified certificate to extract
+  /// the issuer claim (`iss`). This allows the caller to look up the correct
+  /// CA key before calling [open].
+  Future<String> extractIssuer({
     required IdentityKeyPair ownIdentityKeyPair,
     required Uint8List blob,
     required String recipientId,
-    required int nowMs,
+  }) async {
+    final inner = await _decryptInner(
+      ownIdentityKeyPair: ownIdentityKeyPair,
+      blob: blob,
+      recipientId: recipientId,
+    );
+    final certB64 = inner['cert'];
+    if (certB64 is! String) {
+      throw const SealedSenderException('cert field missing');
+    }
+    final Uint8List certBytes;
+    try {
+      certBytes = base64Decode(certB64);
+    } catch (_) {
+      throw const SealedSenderException('cert base64 invalid');
+    }
+    final Map<String, dynamic> c;
+    try {
+      c = jsonDecode(utf8.decode(certBytes)) as Map<String, dynamic>;
+    } catch (_) {
+      throw const SealedSenderException('cert not json');
+    }
+    final iss = c['iss'];
+    if (iss is! String) {
+      throw const SealedSenderException('cert missing iss');
+    }
+    return iss;
+  }
+
+  Future<Map<String, dynamic>> _decryptInner({
+    required IdentityKeyPair ownIdentityKeyPair,
+    required Uint8List blob,
+    required String recipientId,
   }) async {
     if (blob.length < _kEphPubLen + _kNonceLen + _kMacLen) {
       throw const SealedSenderException('blob too short');
@@ -177,13 +195,6 @@ class SealedSender {
     final cipherText = blob.sublist(off, blob.length - _kMacLen);
     final mac = blob.sublist(blob.length - _kMacLen);
 
-    // Point-decode, ECDH, key derivation, and AEAD decrypt are ALL hostile
-    // input here (the blob comes from the untrusted relay). Decoding a
-    // malformed/low-order ephemeral point throws InvalidKeyException /
-    // ArgumentError; a tampered blob, a blob addressed to someone else, or a
-    // wrong key surface as SecretBoxAuthenticationError. Every one of these
-    // must fail closed as SealedSenderException — the AEAD MAC is the real
-    // authentication gate and there is NO non-sealed fall-through.
     final List<int> innerBytes;
     try {
       final ephPub = Curve.decodePoint(_withTag(ephPubRaw), 0);
@@ -205,12 +216,37 @@ class SealedSender {
       throw const SealedSenderException('outer open failed');
     }
 
-    final Map<String, dynamic> inner;
     try {
-      inner = jsonDecode(utf8.decode(innerBytes)) as Map<String, dynamic>;
+      return jsonDecode(utf8.decode(innerBytes)) as Map<String, dynamic>;
     } catch (_) {
       throw const SealedSenderException('inner not json');
     }
+  }
+
+  /// Recipient-side unwrap. Decrypts the outer envelope with our identity
+  /// private key, verifies the embedded sender certificate against the
+  /// given CA key and its expiry, and returns the authenticated sender id
+  /// plus the inner Double-Ratchet ciphertext.
+  ///
+  /// [ownIdentityKeyPair] — this device's Signal identity keypair.
+  /// [blob] — the bytes from `SealedEnvelope.ciphertext`.
+  /// [recipientId] — OUR relay handle; must equal the AAD the sender used.
+  /// [nowMs] — current unix time in ms, for expiry checks (injected for
+  ///   testability).
+  ///
+  /// Throws [SealedSenderException] on any malformed/forged/expired input.
+  Future<OpenedSealed> open({
+    required IdentityKeyPair ownIdentityKeyPair,
+    required Uint8List blob,
+    required String recipientId,
+    required Uint8List caPublicKey,
+    required int nowMs,
+  }) async {
+    final inner = await _decryptInner(
+      ownIdentityKeyPair: ownIdentityKeyPair,
+      blob: blob,
+      recipientId: recipientId,
+    );
 
     final certB64 = inner['cert'];
     final certSigB64 = inner['cert_sig'];
@@ -229,6 +265,8 @@ class SealedSender {
     if (recipIdCommit != recipientId) {
       throw const SealedSenderException('recipient id commitment mismatch');
     }
+    // We need to extract ephPubRaw to verify the commitment. It's the first 32 bytes of the blob.
+    final ephPubRaw = blob.sublist(0, _kEphPubLen);
     if (ephPubCommitB64 != base64Encode(ephPubRaw)) {
       throw const SealedSenderException('ephemeral key commitment mismatch');
     }
@@ -236,6 +274,7 @@ class SealedSender {
     final cert = _verifyCertificate(
       certB64: certB64,
       sigB64: certSigB64,
+      caPublicKey: ed.PublicKey(_requireLen(caPublicKey, 32, 'CA pubkey')),
       nowMs: nowMs,
     );
 
@@ -253,6 +292,7 @@ class SealedSender {
   SenderCertificate _verifyCertificate({
     required String certB64,
     required String sigB64,
+    required ed.PublicKey caPublicKey,
     required int nowMs,
   }) {
     // base64 of the cert/sig comes from adversary-controlled inner JSON;
@@ -267,7 +307,7 @@ class SealedSender {
     } catch (_) {
       throw const SealedSenderException('cert base64 invalid');
     }
-    if (!ed.verify(_caPublicKey, certBytes, signature)) {
+    if (!ed.verify(caPublicKey, certBytes, signature)) {
       throw const SealedSenderException('cert signature invalid');
     }
     final Map<String, dynamic> c;
@@ -276,13 +316,14 @@ class SealedSender {
     } catch (_) {
       throw const SealedSenderException('cert not json');
     }
+    final iss = c['iss'];
     final uid = c['uid'];
     final ikB64 = c['ik'];
     final expRaw = c['exp'];
     // `exp` arrives as a JSON number. On native Dart that decodes to int,
     // but on Dart-web ALL numbers are double — accept num and normalize so
     // a legitimately-issued cert is not spuriously rejected on web.
-    if (uid is! String || ikB64 is! String || expRaw is! num) {
+    if (iss is! String || uid is! String || ikB64 is! String || expRaw is! num) {
       throw const SealedSenderException('cert fields missing');
     }
     final exp = expRaw.toInt();
@@ -298,7 +339,7 @@ class SealedSender {
     if (ik.length != _kRawKeyLen) {
       throw const SealedSenderException('cert ik bad length');
     }
-    return SenderCertificate(uid: uid, identityKeyRaw: ik, expiryMs: exp);
+    return SenderCertificate(iss: iss, uid: uid, identityKeyRaw: ik, expiryMs: exp);
   }
 
   Future<Uint8List> _deriveKey({
@@ -377,11 +418,13 @@ class OpenedSealed {
 
 /// Parsed, signature-verified sender certificate.
 class SenderCertificate {
+  final String iss;
   final String uid;
   final Uint8List identityKeyRaw;
   final int expiryMs;
 
   const SenderCertificate({
+    required this.iss,
     required this.uid,
     required this.identityKeyRaw,
     required this.expiryMs,

@@ -40,6 +40,7 @@ void main() {
     ed.PrivateKey? signWith,
   }) {
     final bytes = Uint8List.fromList(utf8.encode(jsonEncode(<String, Object>{
+      'iss': 'test.local',
       'uid': uid,
       'ik': base64.encode(ikRaw),
       'exp': expMs,
@@ -51,7 +52,7 @@ void main() {
   setUp(() {
     ca = ed.generateKey();
     caPub = Uint8List.fromList(ca.publicKey!.bytes);
-    ss = SealedSender(caPublicKey: caPub);
+    ss = SealedSender();
 
     recipientKp = Curve.generateKeyPair();
     recipientIdentity =
@@ -77,6 +78,7 @@ void main() {
       ownIdentityKeyPair: recipientIdentity,
       blob: blob,
       recipientId: recipientUid,
+      caPublicKey: caPub,
       nowMs: now,
     );
 
@@ -104,6 +106,7 @@ void main() {
         ownIdentityKeyPair: recipientIdentity,
         blob: blob,
         recipientId: recipientUid,
+        caPublicKey: caPub,
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -127,6 +130,7 @@ void main() {
         ownIdentityKeyPair: recipientIdentity,
         blob: blob,
         recipientId: 'someone-else',
+        caPublicKey: caPub,
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -153,6 +157,7 @@ void main() {
         ownIdentityKeyPair: recipientIdentity,
         blob: blob,
         recipientId: recipientUid,
+        caPublicKey: caPub,
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -167,6 +172,7 @@ void main() {
         ownIdentityKeyPair: recipientIdentity,
         blob: Uint8List.fromList(List<int>.filled(10, 0)),
         recipientId: recipientUid,
+        caPublicKey: caPub,
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -178,6 +184,7 @@ void main() {
         ownIdentityKeyPair: recipientIdentity,
         blob: Uint8List.fromList(List<int>.filled(80, 0)),
         recipientId: recipientUid,
+        caPublicKey: caPub,
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -206,6 +213,7 @@ void main() {
         ownIdentityKeyPair: recipientIdentity,
         blob: blob,
         recipientId: recipientUid,
+        caPublicKey: caPub,
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -220,17 +228,17 @@ void main() {
   // the cert JSON shape ever changes (would be a wire-break).
   test('Go-signed certificate verifies and opens in Dart', () async {
     final goPub =
-        base64.decode('ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=');
+        base64.decode('U8MewL58yM1S58/Jx/vOyB46gVIIX9mIjGO0y1M4xeM=');
     final goCert = base64.decode(
-        'eyJ1aWQiOiJzZW5kZXItdWlkLUFBQUEiLCJpayI6IkFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE9IiwiZXhwIjoxNzAwMDAwMDAwMDAwfQ==');
+        'eyJpc3MiOiJ0ZXN0LmxvY2FsIiwidWlkIjoic2VuZGVyLXVpZC1BQUFBIiwiaWsiOiJBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBPSIsImV4cCI6MTcwMDA4NjQwMDAwMH0=');
     final goSig = base64.decode(
-        '0Nt89CGht0MQuUC5OgufheIZCDPhU0aF3JWQ05DwCHN/N2Nu4X0AE5Ptg7PsGGbLtdsl1GpNJVpQ4WmgmZv4Ag==');
+        'iWETh2mwK/KgqOfkyEslJKMVEDvMRbKcrmmII21/Hd4Z1CUNb9ENXY8SQO2VHMiIzqpwIUSnK2BLn5B98H0xDQ==');
 
     // Direct proof: Dart verifies a Go crypto/ed25519 signature.
     expect(ed.verify(ed.PublicKey(goPub), goCert, goSig), isTrue);
 
     // End-to-end: the Go-signed cert flows through the sealed envelope.
-    final goSs = SealedSender(caPublicKey: Uint8List.fromList(goPub));
+    final goSs = SealedSender();
     final blob = await goSs.seal(
       recipientId: recipientUid,
       recipientIdentityKey: recipientKp.publicKey,
@@ -242,6 +250,7 @@ void main() {
       ownIdentityKeyPair: recipientIdentity,
       blob: blob,
       recipientId: recipientUid,
+      caPublicKey: Uint8List.fromList(goPub),
       nowMs: 1699999999000, // before exp
     );
     expect(opened.senderId, 'sender-uid-AAAA');
@@ -264,6 +273,7 @@ void main() {
         ownIdentityKeyPair: recipientIdentity,
         blob: blob,
         recipientId: recipientUid,
+        caPublicKey: caPub,
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -285,15 +295,22 @@ void main() {
         ownIdentityKeyPair: recipientIdentity,
         blob: blob,
         recipientId: recipientUid,
+        caPublicKey: caPub,
         nowMs: exp,
       ),
       throwsA(isA<SealedSenderException>()),
     );
   });
 
-  test('SealedSender rejects a non-32-byte CA key', () {
+  test('open rejects a non-32-byte CA key', () {
     expect(
-      () => SealedSender(caPublicKey: Uint8List(31)),
+      () => ss.open(
+        ownIdentityKeyPair: recipientIdentity,
+        blob: Uint8List.fromList(List<int>.filled(80, 0)),
+        recipientId: recipientUid,
+        caPublicKey: Uint8List(31),
+        nowMs: 0,
+      ),
       throwsA(isA<SealedSenderException>()),
     );
   });
@@ -366,6 +383,7 @@ void main() {
           ownIdentityKeyPair: recipientIdentity,
           blob: blob,
           recipientId: recipientUid,
+          caPublicKey: caPub,
           nowMs: now,
         ),
         throwsA(
@@ -417,6 +435,7 @@ void main() {
           ownIdentityKeyPair: recipientIdentity,
           blob: blob,
           recipientId: recipientUid,
+          caPublicKey: caPub,
           nowMs: now,
         ),
         throwsA(

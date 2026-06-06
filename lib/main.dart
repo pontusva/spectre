@@ -165,31 +165,14 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
       );
       relayService.attachPrekeyService(prekeyService);
 
-      // Sealed Sender: fetch + TOFU-pin the relay's CA key, then build a
-      // SealedSender bound to it. Boot-resilient: if the CA key can't be
-      // obtained (relay unreachable and none pinned) we proceed with a null
-      // SealedSender — sealed messaging stays unavailable (send queues, inbound
-      // drops) until a restart with the relay reachable, rather than blocking
-      // app bring-up. The HTTP fetch is internally bounded by a timeout.
-      SealedSender? sealedSender;
+      final sealedCaService = SealedCaService(relayUrl: relayUri);
       try {
-        const secureStorage = FlutterSecureStorage(
-          aOptions: AndroidOptions(
-            encryptedSharedPreferences: true,
-            resetOnError: false,
-          ),
-          iOptions: IOSOptions(
-            accessibility: KeychainAccessibility.first_unlock_this_device,
-            synchronizable: false,
-          ),
-        );
-        await secureStorage.delete(key: 'spectre.sealed_ca_pub');
-        sealedSender =
-            await SealedCaService(relayUrl: relayUri).sealedSender();
+        // Pre-fetch the local relay's CA key to fail early if there's a mismatch
+        // or network issue, though MessageService will fetch per-domain anyway.
+        await sealedCaService.getCaKeyForDomain(relayUri.authority);
       } catch (e) {
         // ignore: avoid_print
-        print('Sealed CA error: $e');
-        sealedSender = null;
+        print('Sealed CA error during startup pre-fetch: $e');
       }
 
       final messageService = MessageService(
@@ -200,7 +183,7 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
         relayService: relayService,
         relayAuthManager: relayAuthManager,
         prekeyService: prekeyService,
-        sealedSender: sealedSender,
+        sealedCaService: sealedCaService,
       );
 
       // Kick off relay connection in the background. UI is functional

@@ -56,46 +56,46 @@ class SealedCaService {
               ),
             );
 
-  /// Returns a [SealedSender] bound to the pinned CA key.
+  /// Returns the pinned CA key for the given domain.
   ///
-  /// On first run, fetches `GET /sealed-ca`, validates the key length, and
-  /// pins it (TOFU). On subsequent runs, fetches again and compares to the
-  /// pinned value: a match returns a [SealedSender]; a MISMATCH throws
-  /// [SealedCaException] and pins nothing new. If the network fetch fails but
-  /// we have a pinned key, we proceed with the pinned key (offline-tolerant)
-  /// — the pin is the security anchor, not the fetch.
-  Future<SealedSender> sealedSender() async {
-    final pinned = await _loadPinned();
+  /// On first run, fetches `GET /sealed-ca` from the domain, validates the key
+  /// length, and pins it (TOFU). On subsequent runs, fetches again and compares
+  /// to the pinned value: a MISMATCH throws [SealedCaException] and pins nothing
+  /// new. If the network fetch fails but we have a pinned key, we proceed with
+  /// the pinned key (offline-tolerant).
+  Future<Uint8List> getCaKeyForDomain(String domain) async {
+    final pinKey = '$_kPinKey.$domain';
+    final pinned = await _loadPinned(pinKey);
 
     Uint8List? fetched;
     try {
-      fetched = await _fetchCaKey();
+      fetched = await _fetchCaKey(domain);
     } catch (_) {
       // Network/parse failure. If we already have a pinned key, use it; the
       // CA key is long-lived and pinned, so a transient fetch failure must
       // not block sealed messaging. With no pinned key there is nothing to
       // fall back to — fail closed.
       if (pinned == null) {
-        throw const SealedCaException('CA key unavailable and none pinned');
+        throw SealedCaException('CA key unavailable and none pinned for $domain');
       }
-      return SealedSender(caPublicKey: pinned);
+      return pinned;
     }
 
     if (pinned == null) {
-      await _storage.write(key: _kPinKey, value: base64Encode(fetched));
-      return SealedSender(caPublicKey: fetched);
+      await _storage.write(key: pinKey, value: base64Encode(fetched));
+      return fetched;
     }
 
     if (!_bytesEqual(pinned, fetched)) {
       // Pinned-vs-served mismatch: possible relay compromise / MITM. Do not
       // update the pin, do not trust the new key. Surface a generic error.
-      throw const SealedCaException('CA key changed since first use');
+      throw SealedCaException('CA key changed since first use for $domain');
     }
-    return SealedSender(caPublicKey: pinned);
+    return pinned;
   }
 
-  Future<Uint8List?> _loadPinned() async {
-    final stored = await _storage.read(key: _kPinKey);
+  Future<Uint8List?> _loadPinned(String pinKey) async {
+    final stored = await _storage.read(key: pinKey);
     if (stored == null) return null;
     try {
       final bytes = base64Decode(stored);
@@ -106,8 +106,8 @@ class SealedCaService {
     }
   }
 
-  Future<Uint8List> _fetchCaKey() async {
-    final url = _httpUrlFor('/sealed-ca');
+  Future<Uint8List> _fetchCaKey(String domain) async {
+    final url = _httpUrlForDomain(domain);
     final client = HttpClient();
     try {
       final req = await client.getUrl(url);
@@ -138,16 +138,14 @@ class SealedCaService {
     }
   }
 
-  /// ws:// -> http://, wss:// -> https:// (mirrors PrekeyService._httpUrlFor),
-  /// so the same relay URL config works for both the WS control channel and
-  /// the public HTTP key endpoints.
-  Uri _httpUrlFor(String path) {
+  /// ws:// -> http://, wss:// -> https://
+  Uri _httpUrlForDomain(String domain) {
     final scheme = switch (_relayUrl.scheme) {
       'wss' => 'https',
       'ws' => 'http',
       _ => _relayUrl.scheme,
     };
-    return _relayUrl.replace(scheme: scheme, path: path);
+    return Uri.parse('$scheme://$domain/sealed-ca');
   }
 
   static bool _bytesEqual(Uint8List a, Uint8List b) {

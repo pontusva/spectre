@@ -16,6 +16,7 @@ import '../core/models/message.dart';
 import '../core/storage/secure_database.dart';
 import 'network/prekey_service.dart';
 import 'network/relay_service.dart';
+import 'network/sealed_ca_service.dart';
 
 /// Coarse outcome of a [MessageService.sendMessage] call.
 enum MessageStatus {
@@ -111,11 +112,10 @@ class MessageService {
   // one. See receiveMessage().
   final PrekeyService _prekeyService;
 
-  // Sealed Sender. Outgoing messages are sealed with seal(); incoming ones are
-  // opened with open() + the C2 identity binding. Null only when the relay CA
-  // could not be pinned this run (or in tests); then send queues and receive
-  // fails closed (drops) — there is NO unsealed fallback path.
-  final SealedSender? _sealed;
+  // Sealed CA Service. Used to resolve the correct CA key for an incoming
+  // message by reading its 'iss' claim.
+  final SealedCaService _sealedCaService;
+  final SealedSender _sealed;
 
   final Uuid _uuid;
   final StreamController<DecryptedMessage> _decryptedController =
@@ -162,6 +162,7 @@ class MessageService {
     required RelayService relayService,
     required RelayAuthManager relayAuthManager,
     required PrekeyService prekeyService,
+    required SealedCaService sealedCaService,
     SealedSender? sealedSender,
     Uuid? uuid,
   })  : _identity = identityManager,
@@ -171,15 +172,10 @@ class MessageService {
         _relay = relayService,
         _relayAuth = relayAuthManager,
         _prekeyService = prekeyService,
-        _sealed = sealedSender,
+        _sealedCaService = sealedCaService,
+        _sealed = sealedSender ?? SealedSender(),
         _uuid = uuid ?? const Uuid() {
-    // Announce the sealed-sender state once at startup, so a build that
-    // couldn't pin the relay CA (sealed sender unavailable) is obvious rather
-    // than silently dropping every message.
-    _log(_sealed != null
-        ? 'sealed sender: ACTIVE (authenticated cert, no sender on the wire)'
-        : 'sealed sender: UNAVAILABLE (relay CA not pinned — messaging disabled '
-            'until reachable)');
+    _log('sealed sender: ACTIVE');
     _incomingSub = _relay.incoming.listen(_onRelayFrame);
     _stateSub = _relay.connectionState.listen((state) {
       if (state == RelayConnectionState.connected) {
@@ -327,9 +323,6 @@ class MessageService {
   /// prerequisite is missing so [_deliver] can queue rather than leak.
   Future<String> _sealForWire(String recipientId, String innerCtB64) async {
     final sealed = _sealed;
-    if (sealed == null) {
-      throw StateError('sealed sender not configured');
-    }
     // Recipient identity key from the established session — no prekey-bundle
     // refetch, so no one-time prekey is burned per message.
     final recipientIdentityKey = await _sessions.remoteIdentityKey(recipientId);
@@ -392,10 +385,6 @@ class MessageService {
     // pinned this run), there is no authenticated way to attribute an inbound
     // message, so we drop it rather than trust the wire.
     final sealed = _sealed;
-    if (sealed == null) {
-      _log('dropped envelope: sealed sender not configured');
-      return;
-    }
     final Uint8List blob;
     try {
       blob = base64Decode(rawCiphertext);
@@ -411,12 +400,33 @@ class MessageService {
         ? envelopeRecipientId
         : identity.userId;
 
+    final String iss;
+    try {
+      iss = await sealed.extractIssuer(
+        ownIdentityKeyPair: identity.identityKeyPair,
+        blob: blob,
+        recipientId: recipientId,
+      );
+    } catch (e) {
+      _log('dropped envelope: could not extract issuer :: $e');
+      return;
+    }
+
+    final Uint8List caPublicKey;
+    try {
+      caPublicKey = await _sealedCaService.getCaKeyForDomain(iss);
+    } catch (e) {
+      _log('dropped envelope: could not get CA key for issuer $iss :: $e');
+      return;
+    }
+
     final OpenedSealed opened;
     try {
       opened = await sealed.open(
         ownIdentityKeyPair: identity.identityKeyPair,
         blob: blob,
         recipientId: recipientId,
+        caPublicKey: caPublicKey,
         // H2: replay is guarded below by the persistent message-id dedup.
         // Remaining minor follow-up — expiry trusts the device clock (no
         // trusted offline time source); acceptable, documented in review.
