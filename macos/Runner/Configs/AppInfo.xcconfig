@@ -8,7 +8,7 @@
 PRODUCT_NAME = spectre
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.spectre.spectre
+PRODUCT_BUNDLE_IDENTIFIER = com.pontusva.spectre
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 com.spectre. All rights reserved.
