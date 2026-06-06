@@ -193,6 +193,8 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Idempotent: subsequent calls after a ready state are O(1) — the
   /// SessionManager.hasSession check short-circuits everything else.
   Future<bool> _ensureSession() async {
+      // ignore: avoid_print
+  print('_ensureSession recipientId: ' + widget.recipientId); 
     if (await widget.sessionManager.hasSession(widget.recipientId)) {
       if (_sessionState != _SessionState.ready) {
         setState(() => _sessionState = _SessionState.ready);

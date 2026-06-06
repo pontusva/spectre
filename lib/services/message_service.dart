@@ -290,15 +290,18 @@ class MessageService {
   /// bundle on the relay (never registered / not reachable) so the caller can
   /// surface that; otherwise the normal send status.
   Future<MessageStatus> sendInvitation(String recipientId) async {
-    if (_wiped) {
-      throw StateError('MessageService has been wiped');
-    }
     if (!await _sessions.hasSession(recipientId)) {
       try {
         final bundle = await _prekeyService.fetchBundle(recipientId);
-        if (bundle == null) return MessageStatus.failed; // not registered
+        // ignore: avoid_print
+        print('bundle fetched: ' + (bundle == null ? 'null' : 'ok'));
+        if (bundle == null) return MessageStatus.failed;
         await _sessions.initializeSession(recipientId, bundle);
+        // ignore: avoid_print
+        print('session initialized for: ' + recipientId);
       } catch (e) {
+        // ignore: avoid_print
+        print('session init error: ' + e.toString());
         _log('invitation session init failed :: ${e.runtimeType}');
         return MessageStatus.failed;
       }

@@ -121,6 +121,8 @@ class PrekeyService {
   /// an OTPK with no benefit.
   Future<PreKeyBundle?> fetchBundle(String recipientId) async {
     final url = _httpUrlFor(recipientId);
+    // ignore: avoid_print
+    print('Fetching prekey from: ' + url.toString());
     final client = HttpClient();
     try {
       final req = await client.getUrl(url);
@@ -147,17 +149,32 @@ class PrekeyService {
     }
   }
 
-  Uri _httpUrlFor(String recipientId) {
-    // ws://  -> http://,  wss:// -> https://. Anything else (already
-    // http/https, or a non-websocket scheme) we pass through unchanged
-    // so a caller can point at a non-TLS dev relay without ceremony.
-    final scheme = switch (_relayUrl.scheme) {
-      'wss' => 'https',
-      'ws' => 'http',
-      _ => _relayUrl.scheme,
-    };
-    return _relayUrl.replace(scheme: scheme, path: '/prekeys/$recipientId');
+Uri _httpUrlFor(String recipientId) {
+  final scheme = switch (_relayUrl.scheme) {
+    'wss' => 'https',
+    'ws' => 'http',
+    _ => _relayUrl.scheme,
+  };
+
+  // Federation: if recipientId contains @, fetch prekeys from remote relay
+  if (recipientId.contains('@')) {
+    final atIndex = recipientId.indexOf('@');
+    final username = recipientId.substring(0, atIndex);
+    final domain = recipientId.substring(atIndex + 1);
+    // domain may be host or host:port
+    final uri = Uri.tryParse('http://$domain');
+    if (uri != null) {
+      return Uri(
+        scheme: scheme,
+        host: uri.host,
+        port: uri.port > 0 ? uri.port : null,
+        path: '/prekeys/$username',
+      );
+    }
   }
+
+  return _relayUrl.replace(scheme: scheme, path: '/prekeys/$recipientId');
+}
 
   /// Reconstructs a libsignal [PreKeyBundle] from the relay's JSON.
   /// Throws on missing/malformed fields — the caller treats a throw as
