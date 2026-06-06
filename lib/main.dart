@@ -171,9 +171,12 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
       // app bring-up. The HTTP fetch is internally bounded by a timeout.
       SealedSender? sealedSender;
       try {
+        await const FlutterSecureStorage().delete(key: 'spectre.sealed_ca_pub');
         sealedSender =
             await SealedCaService(relayUrl: relayUri).sealedSender();
-      } catch (_) {
+      } catch (e) {
+        // ignore: avoid_print
+        print('Sealed CA error: $e');
         sealedSender = null;
       }
 
