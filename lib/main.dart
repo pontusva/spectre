@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import 'core/crypto/identity_manager.dart';
 import 'core/crypto/prekey_manager.dart';
 import 'core/crypto/relay_auth_manager.dart';
@@ -171,7 +173,17 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
       // app bring-up. The HTTP fetch is internally bounded by a timeout.
       SealedSender? sealedSender;
       try {
-        await const FlutterSecureStorage().delete(key: 'spectre.sealed_ca_pub');
+        const secureStorage = FlutterSecureStorage(
+          aOptions: AndroidOptions(
+            encryptedSharedPreferences: true,
+            resetOnError: false,
+          ),
+          iOptions: IOSOptions(
+            accessibility: KeychainAccessibility.first_unlock_this_device,
+            synchronizable: false,
+          ),
+        );
+        await secureStorage.delete(key: 'spectre.sealed_ca_pub');
         sealedSender =
             await SealedCaService(relayUrl: relayUri).sealedSender();
       } catch (e) {
