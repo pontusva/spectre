@@ -41,10 +41,9 @@ class SealedCaService {
   final FlutterSecureStorage _storage;
 
   SealedCaService({
-    required Uri relayUrl,
+    required this._relayUrl,
     FlutterSecureStorage? storage,
-  })  : _relayUrl = relayUrl,
-        _storage = storage ??
+  })  : _storage = storage ??
             const FlutterSecureStorage(
               aOptions: AndroidOptions(
                 encryptedSharedPreferences: true,

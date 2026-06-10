@@ -3,10 +3,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:pointycastle/digests/sha256.dart';
 
-import '../../core/crypto/identity_manager.dart';
+
 import '../../core/models/contact.dart';
 import '../../core/models/conversation.dart';
-import '../../core/models/message.dart';
+
 import '../theme/app_theme.dart';
 import '../theme/router.dart';
 
@@ -108,7 +108,7 @@ class _ContactScreenState extends State<ContactScreen> {
   Future<void> _editNickname() async {
     final result = await showDialog<String>(
       context: context,
-      barrierColor: Colors.black.withOpacity(0.7),
+      barrierColor: Colors.black.withValues(alpha: 0.7),
       builder: (ctx) => _NicknameDialog(initial: _contact.displayName ?? ''),
     );
     if (result == null || !mounted) return; // cancelled
@@ -160,7 +160,7 @@ class _ContactScreenState extends State<ContactScreen> {
     if (!mounted) return;
     final confirmed = await showDialog<bool>(
       context: context,
-      barrierColor: Colors.black.withOpacity(0.78),
+      barrierColor: Colors.black.withValues(alpha: 0.78),
       builder: (ctx) => _DeleteConfirmDialog(
         contactLabel: _truncate(_contact.userId, 8),
         conversationCount: matching.length,

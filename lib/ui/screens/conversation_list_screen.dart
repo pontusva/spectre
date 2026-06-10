@@ -108,7 +108,7 @@ class _ConversationListScreenState extends State<ConversationListScreen>
   Future<void> _confirmAndWipe() async {
     final confirmed = await showDialog<bool>(
       context: context,
-      barrierColor: Colors.black.withOpacity(0.85),
+      barrierColor: Colors.black.withValues(alpha: 0.85),
       builder: (ctx) => const _PanicWipeDialog(),
     );
     if (confirmed != true || !mounted) return;
@@ -125,7 +125,7 @@ class _ConversationListScreenState extends State<ConversationListScreen>
   Future<void> _startNewConversation() async {
     final recipientId = await showDialog<String>(
       context: context,
-      barrierColor: Colors.black.withOpacity(0.7),
+      barrierColor: Colors.black.withValues(alpha: 0.7),
       builder: (ctx) => const _NewConversationDialog(),
     );
     if (recipientId == null || recipientId.isEmpty || !mounted) return;
@@ -171,7 +171,7 @@ class _ConversationListScreenState extends State<ConversationListScreen>
     final action = await showModalBottomSheet<_TileAction>(
       context: context,
       backgroundColor: SpectreColors.blackLess,
-      barrierColor: Colors.black.withOpacity(0.5),
+      barrierColor: Colors.black.withValues(alpha: 0.5),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.zero,
         side: BorderSide(color: SpectreColors.hairline, width: 1),
@@ -201,7 +201,7 @@ class _ConversationListScreenState extends State<ConversationListScreen>
     final action = await showModalBottomSheet<_RequestAction>(
       context: context,
       backgroundColor: SpectreColors.blackLess,
-      barrierColor: Colors.black.withOpacity(0.5),
+      barrierColor: Colors.black.withValues(alpha: 0.5),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.zero,
         side: BorderSide(color: SpectreColors.hairline, width: 1),
@@ -474,7 +474,7 @@ class _ConversationTile extends StatelessWidget {
       onTap: onTap,
       onLongPress: onLongPress,
       highlightColor: SpectreColors.purpleHair,
-      splashColor: SpectreColors.purpleDeep.withOpacity(0.2),
+      splashColor: SpectreColors.purpleDeep.withValues(alpha: 0.2),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
         color: Colors.transparent,
@@ -705,7 +705,7 @@ class _SheetButton extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       highlightColor: SpectreColors.purpleHair,
-      splashColor: SpectreColors.purpleDeep.withOpacity(0.25),
+      splashColor: SpectreColors.purpleDeep.withValues(alpha: 0.25),
       child: Container(
         width: double.infinity,
         padding: EdgeInsets.symmetric(vertical: small ? 10 : 16),

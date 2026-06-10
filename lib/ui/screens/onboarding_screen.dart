@@ -636,7 +636,7 @@ class _ProtocolStep extends StatelessWidget {
             child: ListView.separated(
               padding: EdgeInsets.zero,
               itemCount: _blocks.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 22),
+              separatorBuilder: (_, _) => const SizedBox(height: 22),
               itemBuilder: (ctx, i) =>
                   _ProtocolBlockView(block: _blocks[i]),
             ),

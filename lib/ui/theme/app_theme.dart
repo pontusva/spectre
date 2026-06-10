@@ -153,8 +153,8 @@ class AppTheme {
       scaffoldBackgroundColor: SpectreColors.blackDeep,
       canvasColor: SpectreColors.blackDeep,
       dividerColor: SpectreColors.hairline,
-      splashColor: SpectreColors.purpleDeep.withOpacity(0.25),
-      highlightColor: SpectreColors.purpleDeep.withOpacity(0.15),
+      splashColor: SpectreColors.purpleDeep.withValues(alpha: 0.25),
+      highlightColor: SpectreColors.purpleDeep.withValues(alpha: 0.15),
       hoverColor: SpectreColors.purpleHair,
       textTheme: textTheme,
       iconTheme: const IconThemeData(
@@ -318,7 +318,7 @@ class NoisePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final rng = Random(seed);
     final paint = Paint()
-      ..color = SpectreColors.textCold.withOpacity(opacity)
+      ..color = SpectreColors.textCold.withValues(alpha: opacity)
       ..style = PaintingStyle.fill;
     final count = (size.width * size.height * 0.0018).toInt();
     for (var i = 0; i < count; i++) {
@@ -327,7 +327,7 @@ class NoisePainter extends CustomPainter {
       canvas.drawRect(Rect.fromLTWH(x, y, 1, 1), paint);
     }
     final purplePaint = Paint()
-      ..color = SpectreColors.purpleBright.withOpacity(opacity * 0.5);
+      ..color = SpectreColors.purpleBright.withValues(alpha: opacity * 0.5);
     final purpleCount = count ~/ 6;
     for (var i = 0; i < purpleCount; i++) {
       final x = rng.nextDouble() * size.width;
@@ -350,7 +350,7 @@ class ScanlinePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = SpectreColors.textCold.withOpacity(opacity)
+      ..color = SpectreColors.textCold.withValues(alpha: opacity)
       ..style = PaintingStyle.fill;
     for (var y = 0.0; y < size.height; y += spacing) {
       canvas.drawRect(Rect.fromLTWH(0, y, size.width, 1), paint);

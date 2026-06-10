@@ -5,12 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 
 import 'core/crypto/identity_manager.dart';
 import 'core/crypto/prekey_manager.dart';
 import 'core/crypto/relay_auth_manager.dart';
-import 'core/crypto/sealed_sender.dart';
+
 import 'core/crypto/session_manager.dart';
 import 'core/storage/secure_database.dart';
 import 'services/message_service.dart';
@@ -405,7 +405,7 @@ class _BootGlitchTitleState extends State<_BootGlitchTitle>
               child: Text(
                 'SPECTRE',
                 style: style.copyWith(
-                  color: SpectreColors.redDanger.withOpacity(_alpha),
+                  color: SpectreColors.redDanger.withValues(alpha: _alpha),
                 ),
               ),
             ),
@@ -414,7 +414,7 @@ class _BootGlitchTitleState extends State<_BootGlitchTitle>
               child: Text(
                 'SPECTRE',
                 style: style.copyWith(
-                  color: SpectreColors.purpleBright.withOpacity(_alpha),
+                  color: SpectreColors.purpleBright.withValues(alpha: _alpha),
                 ),
               ),
             ),
@@ -485,7 +485,7 @@ class _BlockSpinnerPainter extends CustomPainter {
       final lead = (i - activeIndex) % segments;
       final fade = (1.0 - (lead / segments)).clamp(0.0, 1.0);
       final paint = Paint()
-        ..color = SpectreColors.matrixGreen.withOpacity(fade * 0.9)
+        ..color = SpectreColors.matrixGreen.withValues(alpha: fade * 0.9)
         ..style = PaintingStyle.fill;
       canvas.drawRect(
         Rect.fromCenter(center: Offset(x, y), width: 4, height: 4),

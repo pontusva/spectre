@@ -54,11 +54,10 @@ class PrekeyService {
     required RelayService relayService,
     required PreKeyManager preKeyManager,
     required IdentityManager identityManager,
-    required Uri relayUrl,
+    required this._relayUrl,
   })  : _relay = relayService,
         _prekeys = preKeyManager,
-        _identity = identityManager,
-        _relayUrl = relayUrl;
+        _identity = identityManager;
 
   /// Builds the local prekey bundle and pushes it to the relay over the
   /// authenticated WebSocket. Idempotent: re-uploading replaces the
@@ -121,8 +120,6 @@ class PrekeyService {
   /// an OTPK with no benefit.
   Future<PreKeyBundle?> fetchBundle(String recipientId) async {
     final url = _httpUrlFor(recipientId);
-    // ignore: avoid_print
-    print('Fetching prekey from: ' + url.toString());
     final client = HttpClient();
     try {
       final req = await client.getUrl(url);

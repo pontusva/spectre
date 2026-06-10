@@ -7,7 +7,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/crypto/session_manager.dart';
 import '../../core/models/contact.dart';
-import '../../core/models/message.dart';
+
 import '../../core/storage/secure_database.dart';
 import '../../services/message_service.dart';
 import '../../services/network/prekey_service.dart';
@@ -203,8 +203,7 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Idempotent: subsequent calls after a ready state are O(1) — the
   /// SessionManager.hasSession check short-circuits everything else.
   Future<bool> _ensureSession() async {
-      // ignore: avoid_print
-  print('_ensureSession recipientId: ' + widget.recipientId); 
+
     if (await widget.sessionManager.hasSession(widget.recipientId)) {
       if (_sessionState != _SessionState.ready) {
         setState(() => _sessionState = _SessionState.ready);
@@ -228,8 +227,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       await widget.sessionManager
           .initializeSession(widget.recipientId, bundle);
-          // ignore: avoid_print
-  print('session init ok for: ' + widget.recipientId);
+
       if (mounted) {
         setState(() => _sessionState = _SessionState.ready);
       }
@@ -241,8 +239,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // deliberately do NOT surface the underlying exception class
       // to the UI: a "signature rejected" error vs. "network down"
       // error would be a verification oracle for a hostile relay.
-      // ignore: avoid_print
-  print('session init error: ' + e.toString());
+
       if (mounted) {
         setState(() => _sessionState = _SessionState.transientError);
       }
@@ -1098,7 +1095,7 @@ class _GlitchTitleState extends State<_GlitchTitle>
             child: Text(
               widget.text,
               style: style.copyWith(
-                color: SpectreColors.redDanger.withOpacity(_glitchAlpha * 0.8),
+                color: SpectreColors.redDanger.withValues(alpha: _glitchAlpha * 0.8),
               ),
             ),
           ),
@@ -1108,7 +1105,7 @@ class _GlitchTitleState extends State<_GlitchTitle>
               widget.text,
               style: style.copyWith(
                 color: SpectreColors.purpleBright
-                    .withOpacity(_glitchAlpha * 0.75),
+                    .withValues(alpha: _glitchAlpha * 0.75),
               ),
             ),
           ),

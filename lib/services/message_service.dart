@@ -100,14 +100,11 @@ class _PendingSend {
   final String recipientId;
   final String ciphertextB64;
   final DateTime timestamp;
-  int attempts;
-
   _PendingSend({
     required this.messageId,
     required this.recipientId,
     required this.ciphertextB64,
     required this.timestamp,
-    this.attempts = 0,
   });
 }
 
@@ -172,8 +169,8 @@ class MessageService {
     required SecureDatabase database,
     required RelayService relayService,
     required RelayAuthManager relayAuthManager,
-    required PrekeyService prekeyService,
-    required SealedCaService sealedCaService,
+    required this._prekeyService,
+    required this._sealedCaService,
     SealedSender? sealedSender,
     Uuid? uuid,
   })  : _identity = identityManager,
@@ -182,8 +179,6 @@ class MessageService {
         _db = database,
         _relay = relayService,
         _relayAuth = relayAuthManager,
-        _prekeyService = prekeyService,
-        _sealedCaService = sealedCaService,
         _sealed = sealedSender ?? SealedSender(),
         _uuid = uuid ?? const Uuid() {
     _log('sealed sender: ACTIVE');
@@ -300,15 +295,9 @@ class MessageService {
     if (!await _sessions.hasSession(recipientId)) {
       try {
         final bundle = await _prekeyService.fetchBundle(recipientId);
-        // ignore: avoid_print
-        print('bundle fetched: ' + (bundle == null ? 'null' : 'ok'));
         if (bundle == null) return MessageStatus.failed;
         await _sessions.initializeSession(recipientId, bundle);
-        // ignore: avoid_print
-        print('session initialized for: ' + recipientId);
       } catch (e) {
-        // ignore: avoid_print
-        print('session init error: ' + e.toString());
         _log('invitation session init failed :: ${e.runtimeType}');
         return MessageStatus.failed;
       }
@@ -824,7 +813,6 @@ class MessageService {
     final queued = List<_PendingSend>.from(_pending.values);
     for (final p in queued) {
       if (_relay.currentState != RelayConnectionState.connected) break;
-      p.attempts++;
       try {
         // p.ciphertextB64 is the inner ratchet ciphertext; _deliver reseals it
         // with a current certificate at drain time.
@@ -833,7 +821,7 @@ class MessageService {
         _log('drained pending id=${_redactId(p.messageId)}');
       } catch (e) {
         _log(
-          'retry failed attempt=${p.attempts} :: ${e.runtimeType}',
+          'retry failed :: ${e.runtimeType}',
         );
       }
     }

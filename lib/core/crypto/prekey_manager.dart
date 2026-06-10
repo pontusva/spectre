@@ -68,10 +68,9 @@ class PreKeyManager {
   final IdentityManager _identityManager;
 
   PreKeyManager({
-    required IdentityManager identityManager,
+    required this._identityManager,
     FlutterSecureStorage? storage,
-  })  : _identityManager = identityManager,
-        _storage = storage ??
+  })  : _storage = storage ??
             const FlutterSecureStorage(
               aOptions: AndroidOptions(
                 encryptedSharedPreferences: true,

@@ -125,12 +125,10 @@ class RelayService {
   /// the same binary can be pointed at a community-run relay, a Tor
   /// onion service, or a self-hosted instance without recompilation.
   RelayService({
-    required Uri relayUrl,
-    required IdentityManager identityManager,
-    required RelayAuthManager relayAuthManager,
-  })  : _relayUrl = relayUrl,
-        _identityManager = identityManager,
-        _relayAuthManager = relayAuthManager;
+    required this._relayUrl,
+    required this._identityManager,
+    required this._relayAuthManager,
+  });
 
   /// Inbound messages from the relay, already JSON-decoded. The UI
   /// layer subscribes here to feed [SessionManager.decryptMessage].

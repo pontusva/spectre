@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
-import 'dart:typed_data';
+
 
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
@@ -206,8 +206,7 @@ class SecureDatabase extends _$SecureDatabase {
     return instance;
   }
 
-  SecureDatabase._(QueryExecutor executor, this._secureStorage)
-      : super(executor);
+  SecureDatabase._(super.executor, this._secureStorage);
 
   final FlutterSecureStorage _secureStorage;
   File? _dbFile;

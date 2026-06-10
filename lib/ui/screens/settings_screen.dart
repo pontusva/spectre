@@ -114,7 +114,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _editDisplayName() async {
     final result = await showDialog<String>(
       context: context,
-      barrierColor: Colors.black.withOpacity(0.7),
+      barrierColor: Colors.black.withValues(alpha: 0.7),
       builder: (ctx) => _DisplayNameDialog(initial: _displayName ?? ''),
     );
     if (result == null || !mounted) return; // cancelled
@@ -196,7 +196,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _panicWipe() async {
     final confirmed = await showDialog<bool>(
       context: context,
-      barrierColor: Colors.black.withOpacity(0.85),
+      barrierColor: Colors.black.withValues(alpha: 0.85),
       builder: (_) => const _PanicWipeDialog(),
     );
     if (confirmed != true || !mounted) return;
@@ -800,7 +800,7 @@ class _InlineButton extends StatelessWidget {
       child: Text(
         label,
         style: SpectreTypography.action().copyWith(
-          color: onTap == null ? color.withOpacity(0.6) : color,
+          color: onTap == null ? color.withValues(alpha: 0.6) : color,
           fontSize: 11.5,
         ),
       ),
