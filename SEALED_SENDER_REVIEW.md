@@ -39,10 +39,11 @@ verification, byte-compatible with the Go relay's `crypto/ed25519`).
 
 ## 3. The construction
 
-**Certificate** (relay-signed, `{uid, ik, exp}`):
+**Certificate** (relay-signed, `{uid, ik, iss, exp}`):
 - `uid` = authenticated relay handle of the sender.
 - `ik` = sender's Signal identity public key, taken by the relay from the
   sender's *own registered prekey bundle* (not from the request).
+- `iss` = canonicalized domain of the issuing relay (structural host[:port]).
 - `exp` = issuance + 24h. Signature = Ed25519(CA_priv, exact-json-bytes).
 - Client verifies the signature over the exact received bytes (no
   re-canonicalization), then parses, then checks expiry.
@@ -109,6 +110,7 @@ seal/open math). New items below; "fixed" ones were applied to the core
 | NEW-HIGH-3 | HIGH | REDUCED | The first-message fallback (`fetchBundle`/`initializeSession`) now runs on the **cert-authenticated** `senderId`, not the unauthenticated wire field. Minor TODO: it still fires for Whisper-type failures where it can't help — tighten to PreKey-only to avoid a relay nudging spurious bundle fetches. |
 | H3 | HIGH | **FIXED** | KDF shape: fold `eph_pub‖recip_pub` into HKDF **IKM** (match libsodium `crypto_box_seal`) rather than the salt. Cryptographically equivalent today (both feed the same HMAC-extract), but standard + removes an attacker-salt question and a maintenance footgun. (Implemented: public keys bound directly to IKM with static salt.) |
 | H4 | HIGH | **FIXED** | ChaCha20-Poly1305 is not key-committing; add a transcript commitment (`eph_pub‖recipient_id‖inner_ct`) inside the AEAD. Also resolves design-H1. Elevated by relay-as-CA active attacker. (Implemented: `eph_pub` and `recip_id` added to AEAD payload and verified on open.) |
+| FED-1 | HIGH | **FIXED** | Cross-domain sender identity forgery via spoofed X-Spectre-Relay-ID on the unauthenticated `/federation/deliver` endpoint. Identity AND reply routing both now derive from the signed `cert.iss`; the `federation_sender_relay` header is only validated for agreement and never trusted on its own. `iss` is canonicalized (lowercased, structurally validated host[:port]) before being used as a CA pin key or fetch host, and `open()` refuses a cert whose `iss` differs from the issuer its CA key was resolved for. |
 | H-NEW-1 | HIGH | **FIXED** | No Go→Dart Ed25519 cross-language vector existed. Added a golden vector (Go crypto/ed25519 sign → Dart ed25519_edwards verify + full seal/open). |
 | M-NEW-2 | MED | **FIXED** | `_verifyCertificate` base64-decoded cert/sig/ik without fail-closed wrapping → raw `FormatException` could escape the contract. Now throws `SealedSenderException`. |
 | M-NEW-4 | MED | **FIXED** | `exp is! int` rejected legit certs on Dart-web (JSON numbers are double). Now accepts `num` and normalizes. |

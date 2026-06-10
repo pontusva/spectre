@@ -696,13 +696,14 @@ and cache.
 **Sender certificate.** Over the authed WS the client sends
 `{type:"request_sender_cert"}`. Relay replies
 `{type:"sender_cert", cert:<b64 canonical-json>, signature:<b64>}` where
-`cert = {uid, ik, exp}`:
+`cert = {uid, ik, iss, exp}`:
 
 - `uid` = the AUTHENTICATED userID (never client-supplied — same
   authority rule as prekey bundles).
 - `ik` = the userID's Signal identity public key, taken from its
   REGISTERED prekey bundle on the relay (authoritative). Reject issuance
   if no bundle registered.
+- `iss` = canonicalized domain of the issuing relay (structural host[:port]).
 - `exp` = now + 24h. `signature` = Ed25519(CA_priv, canonical(cert)).
 
 **Outer envelope (sender builds, recipient identity key `IK_R` known from
@@ -804,6 +805,7 @@ code-interop) — full consolidated table in SEALED_SENDER_REVIEW.md §5b:
 - H3/H4 (reviewer decision, FIXED): moved public keys into HKDF IKM (H3) and
   added in-AEAD transcript commitment (H4/H1).
 - M4 (reviewer decision, FIXED): folded length-prefixed `recipient_id` into HKDF info context.
+- FED-1 (FIXED): Cross-domain sender identity forgery via spoofed X-Spectre-Relay-ID on the unauthenticated `/federation/deliver` endpoint. Identity AND reply routing both now derive from the signed `cert.iss`; the `federation_sender_relay` header is only validated for agreement and never trusted on its own. `iss` is canonicalized (lowercased, structurally validated host[:port]) before being used as a CA pin key or fetch host, and `open()` refuses a cert whose `iss` differs from the issuer its CA key was resolved for.
 
 NOTE: this internal+agent review reduces but does NOT replace an EXTERNAL
 cryptographer review. C2/H1/H2/NEW-HIGH-1 are blocking for production.
