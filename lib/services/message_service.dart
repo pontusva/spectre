@@ -408,15 +408,24 @@ class MessageService {
         recipientId: recipientId,
       );
     } catch (e) {
-      _log('dropped envelope: could not extract issuer :: $e');
+      _log('dropped envelope: could not extract issuer :: ${e.runtimeType}');
+      return;
+    }
+
+    // FINDING-1 FIX: `iss` is attacker-influenced and about to be used as a
+    // storage key and a URL host — validate and canonicalize it first, and
+    // never let the raw value reach the pin store, the network, or a log.
+    final canonicalIss = canonicalRelayDomain(iss);
+    if (canonicalIss == null) {
+      _log('dropped envelope: invalid cert issuer');
       return;
     }
 
     final Uint8List caPublicKey;
     try {
-      caPublicKey = await _sealedCaService.getCaKeyForDomain(iss);
+      caPublicKey = await _sealedCaService.getCaKeyForDomain(canonicalIss);
     } catch (e) {
-      _log('dropped envelope: could not get CA key for issuer $iss :: $e');
+      _log('dropped envelope: could not get CA key for issuer :: ${e.runtimeType}');
       return;
     }
 
@@ -427,6 +436,9 @@ class MessageService {
         blob: blob,
         recipientId: recipientId,
         caPublicKey: caPublicKey,
+        // Raw iss, exactly as extracted: open() asserts the verified cert's
+        // issuer is the one we resolved the CA key for.
+        expectedIss: iss,
         // H2: replay is guarded below by the persistent message-id dedup.
         // Remaining minor follow-up — expiry trusts the device clock (no
         // trusted offline time source); acceptable, documented in review.
@@ -453,14 +465,21 @@ class MessageService {
     final senderId = opened.senderId;
     final ciphertextB64 = opened.innerCiphertextB64;
 
-    // If this message arrived via federation, append the sender's relay
-    // so replies route back correctly. federation_sender_relay is set by
-    // the receiving relay — it is NOT trusted for identity, only for routing.
-    // Identity trust still rests entirely on the sealed sender construction
-    // and out-of-band safety number verification.
-    final fullSenderId = (federationSenderRelay is String && federationSenderRelay.isNotEmpty)
-        ? '$senderId@$federationSenderRelay'
-        : senderId;
+    // FINDING-3 FIX: the sender's domain is read from the SIGNED certificate
+    // (opened.senderDomain == cert.iss), never from federation_sender_relay.
+    // The header is unsigned, relay-controlled transport metadata; if present
+    // it must agree with the signed issuer or the envelope is dropped. See
+    // deriveFullSenderId for the full rationale.
+    final fullSenderId = deriveFullSenderId(
+      senderUid: senderId,
+      canonicalIss: canonicalIss,
+      federationSenderRelay:
+          federationSenderRelay is String ? federationSenderRelay : null,
+    );
+    if (fullSenderId == null) {
+      _log('dropped envelope: federation_sender_relay disagrees with signed issuer');
+      return;
+    }
 
     final ciphertextBytes = Uint8List.fromList(utf8.encode(ciphertextB64));
     final messageId = _contentHashId(ciphertextBytes);
@@ -604,6 +623,70 @@ class MessageService {
     if (storedB64.isEmpty) return IdentityPinDecision.pinFirstUse;
     if (storedB64 == currentB64) return IdentityPinDecision.matched;
     return IdentityPinDecision.changed;
+  }
+
+  /// Canonicalizes a relay domain (host or host:port) for use as a TRUST
+  /// identifier: lowercases and structurally validates. Returns null when
+  /// the value is not a plausible host[:port] — callers MUST drop.
+  ///
+  /// SECURITY: `iss` is attacker-influenced on first contact (the cert is
+  /// signed by a key we are about to TOFU-pin) and is used as (a) the CA
+  /// pin-storage key, (b) the host of the outbound /sealed-ca fetch, and
+  /// (c) the domain half of the sender's federated identity. Without one
+  /// canonical form a relay can fork the pin namespace by varying case
+  /// ('A.com' vs 'a.com' pin independently, dodging the key-change alarm)
+  /// and point the CA fetch at arbitrary attacker-chosen hosts.
+  ///
+  /// Deliberately still permits IP literals and single-label hosts
+  /// (localhost, docker service names) — the dev federation setup depends
+  /// on them. TODO(prod): behind a production flag, reject IP literals and
+  /// localhost so an inbound message cannot drive a fetch at link-local /
+  /// loopback targets.
+  static String? canonicalRelayDomain(String raw) {
+    final d = raw.trim().toLowerCase();
+    if (d.isEmpty || d.length > 255) return null;
+    final m = RegExp(
+      r'^([a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*)(:(\d{1,5}))?$',
+    ).firstMatch(d);
+    if (m == null) return null;
+    final port = m.group(6);
+    if (port != null) {
+      final p = int.parse(port);
+      if (p < 1 || p > 65535) return null;
+    }
+    return d;
+  }
+
+  /// Pure derivation of the sender's full (possibly federated) identity.
+  /// Returns null when the envelope must be dropped. Pure — unit-testable
+  /// without a DB, same pattern as [decideIdentityPin].
+  ///
+  /// FINDING-3 FIX: the domain half of the identity comes from the SIGNED
+  /// certificate issuer ([canonicalIss]), never from the transport.
+  /// `federation_sender_relay` is an unsigned, relay-controlled header (any
+  /// host can POST /federation/deliver with any X-Spectre-Relay-ID); using
+  /// it as identity let a cert attesting alice@A be filed — and
+  /// safety-number-verified — as alice@B. The header is demoted to a
+  /// consistency signal: when present it must agree with the signed issuer,
+  /// and the identity (which doubles as the reply route) is built from the
+  /// issuer itself.
+  static String? deriveFullSenderId({
+    required String senderUid,
+    required String canonicalIss,
+    required String? federationSenderRelay,
+  }) {
+    if (federationSenderRelay == null || federationSenderRelay.isEmpty) {
+      // Local delivery. Residual, documented: a malicious LOCAL relay could
+      // strip the header so a foreign-issued cert aliases a bare local
+      // handle — but the local relay is itself the CA for local handles and
+      // could mint that cert directly, so this grants no new forgery power.
+      return senderUid;
+    }
+    final canonicalHeader = canonicalRelayDomain(federationSenderRelay);
+    if (canonicalHeader == null || canonicalHeader != canonicalIss) {
+      return null;
+    }
+    return '$senderUid@$canonicalIss';
   }
 
   /// TOFU-pins the peer's identity key for [conversationId] and reports whether

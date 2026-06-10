@@ -79,6 +79,7 @@ void main() {
       blob: blob,
       recipientId: recipientUid,
       caPublicKey: caPub,
+      expectedIss: 'test.local',
       nowMs: now,
     );
 
@@ -107,6 +108,7 @@ void main() {
         blob: blob,
         recipientId: recipientUid,
         caPublicKey: caPub,
+        expectedIss: 'test.local',
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -131,6 +133,7 @@ void main() {
         blob: blob,
         recipientId: 'someone-else',
         caPublicKey: caPub,
+        expectedIss: 'test.local',
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -158,6 +161,7 @@ void main() {
         blob: blob,
         recipientId: recipientUid,
         caPublicKey: caPub,
+        expectedIss: 'test.local',
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -173,6 +177,7 @@ void main() {
         blob: Uint8List.fromList(List<int>.filled(10, 0)),
         recipientId: recipientUid,
         caPublicKey: caPub,
+        expectedIss: 'test.local',
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -185,6 +190,7 @@ void main() {
         blob: Uint8List.fromList(List<int>.filled(80, 0)),
         recipientId: recipientUid,
         caPublicKey: caPub,
+        expectedIss: 'test.local',
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -214,6 +220,7 @@ void main() {
         blob: blob,
         recipientId: recipientUid,
         caPublicKey: caPub,
+        expectedIss: 'test.local',
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -251,6 +258,7 @@ void main() {
       blob: blob,
       recipientId: recipientUid,
       caPublicKey: Uint8List.fromList(goPub),
+      expectedIss: 'test.local',
       nowMs: 1699999999000, // before exp
     );
     expect(opened.senderId, 'sender-uid-AAAA');
@@ -274,6 +282,7 @@ void main() {
         blob: blob,
         recipientId: recipientUid,
         caPublicKey: caPub,
+        expectedIss: 'test.local',
         nowMs: now,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -296,6 +305,7 @@ void main() {
         blob: blob,
         recipientId: recipientUid,
         caPublicKey: caPub,
+        expectedIss: 'test.local',
         nowMs: exp,
       ),
       throwsA(isA<SealedSenderException>()),
@@ -309,10 +319,66 @@ void main() {
         blob: Uint8List.fromList(List<int>.filled(80, 0)),
         recipientId: recipientUid,
         caPublicKey: Uint8List(31),
+        expectedIss: 'test.local',
         nowMs: 0,
       ),
       throwsA(isA<SealedSenderException>()),
     );
+  });
+
+  test('cert issuer differing from expectedIss is rejected', () async {
+    // The caller selected a CA key for 'other.relay' but the (validly
+    // signed) cert claims iss 'test.local' — open() must refuse to pair
+    // them. This is the self-consistency half of the finding-3 fix.
+    final now = 1_700_000_000_000;
+    final cert =
+        makeCert(uid: senderUid, ikRaw: senderIkRaw, expMs: now + 3600 * 1000);
+    final blob = await ss.seal(
+      recipientId: recipientUid,
+      recipientIdentityKey: recipientKp.publicKey,
+      certBytes: cert.bytes,
+      certSignature: cert.sig,
+      innerCiphertextB64: innerCt,
+    );
+    expect(
+      () => ss.open(
+        ownIdentityKeyPair: recipientIdentity,
+        blob: blob,
+        recipientId: recipientUid,
+        caPublicKey: caPub,
+        expectedIss: 'other.relay',
+        nowMs: now,
+      ),
+      throwsA(
+        isA<SealedSenderException>().having(
+          (e) => e.reason,
+          'reason',
+          contains('issuer mismatch'),
+        ),
+      ),
+    );
+  });
+
+  test('open returns the verified issuer as senderDomain', () async {
+    final now = 1_700_000_000_000;
+    final cert =
+        makeCert(uid: senderUid, ikRaw: senderIkRaw, expMs: now + 3600 * 1000);
+    final blob = await ss.seal(
+      recipientId: recipientUid,
+      recipientIdentityKey: recipientKp.publicKey,
+      certBytes: cert.bytes,
+      certSignature: cert.sig,
+      innerCiphertextB64: innerCt,
+    );
+    final opened = await ss.open(
+      ownIdentityKeyPair: recipientIdentity,
+      blob: blob,
+      recipientId: recipientUid,
+      caPublicKey: caPub,
+      expectedIss: 'test.local',
+      nowMs: now,
+    );
+    expect(opened.senderDomain, 'test.local');
   });
 
   group('Transcript and Key Commitment verification (H4)', () {
@@ -384,6 +450,7 @@ void main() {
           blob: blob,
           recipientId: recipientUid,
           caPublicKey: caPub,
+          expectedIss: 'test.local',
           nowMs: now,
         ),
         throwsA(
@@ -436,6 +503,7 @@ void main() {
           blob: blob,
           recipientId: recipientUid,
           caPublicKey: caPub,
+          expectedIss: 'test.local',
           nowMs: now,
         ),
         throwsA(

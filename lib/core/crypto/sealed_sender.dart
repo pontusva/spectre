@@ -240,6 +240,12 @@ class SealedSender {
     required Uint8List blob,
     required String recipientId,
     required Uint8List caPublicKey,
+    /// The issuer the caller resolved [caPublicKey] for (the raw `iss`
+    /// returned by [extractIssuer]). open() re-asserts cert.iss equals it so
+    /// the verify path is self-contained: a cert from domain A can never be
+    /// verified against domain B's pinned key without throwing, regardless
+    /// of caller discipline.
+    required String expectedIss,
     required int nowMs,
   }) async {
     final inner = await _decryptInner(
@@ -278,8 +284,18 @@ class SealedSender {
       nowMs: nowMs,
     );
 
+    // FINDING-3 (part): bind the verified cert to the issuer whose CA key
+    // was used to verify it. extractIssuer and open() parse the same bytes
+    // today, but this assertion makes the verify path self-contained so a
+    // future caller (or refactor) cannot pair cert and key from different
+    // domains.
+    if (cert.iss != expectedIss) {
+      throw const SealedSenderException('cert issuer mismatch');
+    }
+
     return OpenedSealed(
       senderId: cert.uid,
+      senderDomain: cert.iss,
       senderIdentityKeyRaw: cert.identityKeyRaw,
       innerCiphertextB64: ct,
     );
@@ -399,6 +415,13 @@ class OpenedSealed {
   /// Relay handle of the sender, taken from the verified certificate.
   final String senderId;
 
+  /// Issuer domain from the VERIFIED certificate — the only trustworthy
+  /// statement of which relay's CA attested this sender. The domain half of
+  /// the sender's federated identity MUST come from here, never from
+  /// transport metadata like `federation_sender_relay` (unsigned and
+  /// relay-controlled; see MessageService.deriveFullSenderId).
+  final String senderDomain;
+
   /// Sender's Signal identity public key (raw 32 bytes) as attested by the
   /// certificate. The caller MUST check this equals the identity key inside
   /// a PreKeySignalMessage before establishing a session, binding the cert
@@ -411,6 +434,7 @@ class OpenedSealed {
 
   const OpenedSealed({
     required this.senderId,
+    required this.senderDomain,
     required this.senderIdentityKeyRaw,
     required this.innerCiphertextB64,
   });
