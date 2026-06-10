@@ -69,6 +69,14 @@ class _ChatScreenState extends State<ChatScreen> {
   // and (ideally) re-verifies the fingerprint out of band — never a transient
   // toast they can miss.
   bool _keyChanged = false;
+  // Sticky once a message reports FIRST CONTACT (no identity key was pinned
+  // before it). First contact is when a hostile relay-as-CA can actually
+  // forge attribution — it controls both the sender certificate and the
+  // PreKey message — so it must be the LOUDEST moment in the UI, not the
+  // quietest (finding 2 of the sealed-sender review: the old default was
+  // inverted friction). The banner clears only by completing out-of-band
+  // verification (_verified flips true).
+  bool _firstContact = false;
   // Out-of-band verification state for this peer, read from the contact row.
   // The real trust anchor: a verified safety number is the only thing that
   // distinguishes the genuine peer from a relay-as-CA MITM on first contact.
@@ -147,10 +155,12 @@ class _ChatScreenState extends State<ChatScreen> {
   void _onIncoming(DecryptedMessage dm) {
     if (dm.conversationId != widget.conversationId) return;
     if (!mounted) return;
-    // A key change resets the contact to unverified — reflect it in the bar.
-    if (dm.senderKeyChanged) _loadVerification();
+    // A key change resets the contact to unverified; first contact creates
+    // the contact row — either way the verification bar must re-read it.
+    if (dm.senderKeyChanged || dm.senderFirstContact) _loadVerification();
     setState(() {
       if (dm.senderKeyChanged) _keyChanged = true;
+      if (dm.senderFirstContact) _firstContact = true;
       if (_knownIds.add(dm.id)) {
         _items.add(_ChatItem(
           id: dm.id,
@@ -330,6 +340,8 @@ class _ChatScreenState extends State<ChatScreen> {
             children: <Widget>[
               const _SessionMetaBar(),
               _VerificationBar(verified: _verified, onTap: _openContact),
+              if (_firstContact && !_verified)
+                _FirstContactBanner(onTap: _openContact),
               if (_keyChanged) const _KeyChangedBanner(),
               Expanded(child: _buildList()),
               if (_sessionState == _SessionState.peerNotFound)
@@ -416,6 +428,64 @@ class _PeerNotFoundBanner extends StatelessWidget {
   }
 }
 
+/// Loud, persistent FIRST-CONTACT warning. First contact is when a hostile
+/// relay-as-CA can actually forge attribution — it controls both the sender
+/// certificate and the PreKey message, and there is no pinned key yet to
+/// contradict it — so it must carry MORE friction than an established
+/// session, not less. (The old UI had this inverted: senderKeyChanged was
+/// false on first contact and nothing else fired, making the dangerous
+/// moment the quietest one.) Tap routes to the contact screen to verify;
+/// the banner stays until the safety number is verified out of band.
+class _FirstContactBanner extends StatelessWidget {
+  const _FirstContactBanner({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        decoration: const BoxDecoration(
+          color: SpectreColors.blackLess,
+          border: Border(
+            top: BorderSide(color: SpectreColors.redDanger, width: 1),
+            bottom: BorderSide(color: SpectreColors.redDanger, width: 1),
+          ),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              SpectreIcons.warning,
+              style: SpectreTypography.mono().copyWith(
+                color: SpectreColors.redDanger,
+                fontSize: 12,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'first contact — this identity was attested by the relay, '
+                'and the relay is untrusted. verify the safety number out '
+                'of band before trusting who this is. tap to verify.',
+                style: SpectreTypography.mono().copyWith(
+                  color: SpectreColors.redDanger,
+                  fontSize: 12,
+                  height: 1.5,
+                  letterSpacing: 0.6,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// Persistent danger banner shown when an inbound message reports the peer's
 /// Signal identity key changed since it was first pinned. Deliberately sticky
 /// and high-contrast (danger red): a key change is the signature of a MITM or
@@ -468,9 +538,15 @@ class _KeyChangedBanner extends StatelessWidget {
 }
 
 /// Tappable out-of-band verification status for the peer. Green when the
-/// safety number has been confirmed; otherwise an attention-drawing prompt to
-/// go compare it. Tapping opens the peer/contact screen. This is what makes
-/// the trust state legible — without it, "verified" is an invisible DB flag.
+/// safety number has been confirmed; otherwise a DANGER-styled prompt to go
+/// compare it. Tapping opens the peer/contact screen.
+///
+/// The unverified state is deliberately rendered in danger red, not the
+/// theme accent: until the safety number is verified out of band, sender
+/// attribution is a relay claim and the relay is untrusted (finding 2 —
+/// the unverified state used to render in the same purple as the send
+/// button, reading as theme rather than threat). This is what makes the
+/// trust state legible — without it, "verified" is an invisible DB flag.
 class _VerificationBar extends StatelessWidget {
   const _VerificationBar({required this.verified, required this.onTap});
 
@@ -480,7 +556,7 @@ class _VerificationBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color =
-        verified ? SpectreColors.matrixGreen : SpectreColors.purpleBright;
+        verified ? SpectreColors.matrixGreen : SpectreColors.redDanger;
     return InkWell(
       onTap: onTap,
       child: Container(
@@ -503,7 +579,8 @@ class _VerificationBar extends StatelessWidget {
               child: Text(
                 verified
                     ? 'identity verified'
-                    : 'unverified — tap to compare safety number',
+                    : 'UNVERIFIED — sender identity is a relay claim. tap to '
+                        'verify safety number',
                 style: SpectreTypography.caption().copyWith(
                   color: color,
                   letterSpacing: 1.2,

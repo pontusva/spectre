@@ -59,6 +59,16 @@ class DecryptedMessage {
   /// reinstall. False on first contact (nothing pinned yet) and on a match.
   final bool senderKeyChanged;
 
+  /// True when this message established FIRST CONTACT with the peer — no
+  /// identity key was pinned before it. This is the single most dangerous
+  /// moment in the trust model: a hostile relay-as-CA controls both the
+  /// certificate and the PreKey message on first contact, so it can forge
+  /// attribution undetectably at exactly this point. The UI must surface
+  /// first contact LOUDLY as unverified-until-proven, not default to quiet
+  /// (the old behavior: senderKeyChanged=false and no signal at all —
+  /// inverted friction, see finding 2 of the sealed-sender review).
+  final bool senderFirstContact;
+
   const DecryptedMessage({
     required this.id,
     required this.senderId,
@@ -66,6 +76,7 @@ class DecryptedMessage {
     required this.plaintext,
     required this.timestamp,
     this.senderKeyChanged = false,
+    this.senderFirstContact = false,
   });
 }
 
@@ -582,12 +593,16 @@ class MessageService {
     // this session (the stored ciphertext can never be re-decrypted).
     _plaintextCache[messageId] = plaintext;
 
-    // TOFU-pin the peer identity key and detect a change. Best-effort: a
-    // failure here must NEVER block delivery of an already-decrypted message,
-    // so the whole thing is wrapped and defaults to "not changed".
+    // TOFU-pin the peer identity key and surface the decision. Best-effort:
+    // a failure here must NEVER block delivery of an already-decrypted
+    // message, so the whole thing is wrapped and defaults to "no signal".
     var senderKeyChanged = false;
+    var senderFirstContact = false;
     try {
-      senderKeyChanged = await _checkAndPinIdentity(conversationId, fullSenderId);
+      final decision =
+          await _checkAndPinIdentity(conversationId, fullSenderId);
+      senderKeyChanged = decision == IdentityPinDecision.changed;
+      senderFirstContact = decision == IdentityPinDecision.pinFirstUse;
     } catch (e) {
       _log('identity pin check failed :: ${e.runtimeType}');
     }
@@ -609,6 +624,7 @@ class MessageService {
         plaintext: plaintext,
         timestamp: timestamp,
         senderKeyChanged: senderKeyChanged,
+        senderFirstContact: senderFirstContact,
       ));
     }
   }
@@ -689,8 +705,12 @@ class MessageService {
     return '$senderUid@$canonicalIss';
   }
 
-  /// TOFU-pins the peer's identity key for [conversationId] and reports whether
-  /// it CHANGED from a previously-pinned value.
+  /// TOFU-pins the peer's identity key for [conversationId] and reports the
+  /// pin decision: [IdentityPinDecision.pinFirstUse] (FIRST CONTACT — the
+  /// caller must surface this loudly, it is the moment a relay-as-CA forgery
+  /// actually happens), [IdentityPinDecision.matched], or
+  /// [IdentityPinDecision.changed]. Returns null when no session identity
+  /// exists to pin yet.
   ///
   /// The key compared is the one libsignal pinned in the session store (via
   /// [SessionManager.remoteIdentityKey]) — the actual ratchet identity, not the
@@ -701,15 +721,15 @@ class MessageService {
   /// what makes cross-session change detection possible.
   ///
   /// On a change we mark the contact unverified (so the existing
-  /// contact-verification UI reflects it) and return true so the caller flags
+  /// contact-verification UI reflects it) and return `changed` so the caller flags
   /// the message; we deliberately do NOT silently re-pin — the human must
   /// re-verify out of band. Returns false on first use and on a match.
-  Future<bool> _checkAndPinIdentity(
+  Future<IdentityPinDecision?> _checkAndPinIdentity(
     String conversationId,
     String senderId,
   ) async {
     final key = await _sessions.remoteIdentityKey(senderId);
-    if (key == null) return false; // no session identity to pin yet
+    if (key == null) return null; // no session identity to pin yet
     final serialized = key.serialize();
     final currentB64 = base64Encode(serialized);
 
@@ -721,12 +741,12 @@ class MessageService {
     final stored = conv?.recipientPublicKey ?? '';
 
     final decision = decideIdentityPin(stored, currentB64);
-    if (decision == IdentityPinDecision.matched) return false;
+    if (decision == IdentityPinDecision.matched) return decision;
 
     // First use OR a change: (re)pin the conversation key and (re)build the
     // peer's contact record from the CURRENT key so the fingerprint-
     // verification UI has the right safety number to compare, always starting
-    // UNVERIFIED. A change is additionally surfaced loudly (return true ->
+    // UNVERIFIED. A change is additionally surfaced loudly (`changed` ->
     // chat banner): we adopt the new key for message continuity but never
     // silently — the human must re-verify out of band.
     await _db.updateConversationKey(conversationId, currentB64);
@@ -737,9 +757,9 @@ class MessageService {
         'SECURITY: peer identity key CHANGED for ${_redactId(senderId)} '
         '— re-pinned, contact reset to unverified, prompting re-verification',
       );
-      return true;
+      return decision;
     }
-    return false;
+    return decision; // pinFirstUse — FIRST CONTACT, surfaced loudly upstream
   }
 
   /// Creates or refreshes the peer's contact record from their identity key,
