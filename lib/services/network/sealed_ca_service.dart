@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:ed25519_edwards/ed25519_edwards.dart' as ed;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../../core/crypto/sealed_sender.dart';
@@ -40,10 +41,24 @@ class SealedCaService {
   final Uri _relayUrl;
   final FlutterSecureStorage _storage;
 
+  /// Out-of-band CA pins, keyed by canonical domain → raw 32-byte CA pubkey.
+  /// When a domain is present here, its key is ABSOLUTE: the network fetch is
+  /// never trusted to override it, the value is never overwritten, and a
+  /// served key that disagrees fails closed. This is the R3-2 mitigation that
+  /// removes the relay's ability to be its own pinned authority — ship the
+  /// CA key in the build (e.g. --dart-define=SPECTRE_SEALED_CA=<domain>:<b64>)
+  /// so a fresh install does NOT TOFU-trust whatever the relay first serves,
+  /// and so the relay cannot use CA rotation as a network-wide kill switch
+  /// for these domains. Empty by default (pure TOFU, dev posture).
+  final Map<String, Uint8List> _oobPins;
+
   SealedCaService({
-    required this._relayUrl,
+    required Uri relayUrl,
     FlutterSecureStorage? storage,
-  })  : _storage = storage ??
+    Map<String, Uint8List>? outOfBandPins,
+  })  : _relayUrl = relayUrl,
+        _oobPins = outOfBandPins ?? const <String, Uint8List>{},
+        _storage = storage ??
             const FlutterSecureStorage(
               aOptions: AndroidOptions(
                 encryptedSharedPreferences: true,
@@ -55,42 +70,119 @@ class SealedCaService {
               ),
             );
 
+  /// Parses a build-time out-of-band CA pin spec into a domain→key map.
+  /// Format: comma-separated `domain:base64key` entries, e.g.
+  /// `relay.example:AbC...=,backup.example:XyZ...=`. Malformed entries are
+  /// skipped (a bad pin must not brick boot); a wrong-length key is dropped.
+  /// Intended to be fed from `String.fromEnvironment('SPECTRE_SEALED_CA')`.
+  static Map<String, Uint8List> parseOobPins(String raw) {
+    final out = <String, Uint8List>{};
+    if (raw.trim().isEmpty) return out;
+    for (final entry in raw.split(',')) {
+      final i = entry.lastIndexOf(':');
+      if (i <= 0 || i >= entry.length - 1) continue;
+      final domain = entry.substring(0, i).trim().toLowerCase();
+      final b64 = entry.substring(i + 1).trim();
+      if (domain.isEmpty) continue;
+      try {
+        final bytes = base64Decode(b64);
+        if (bytes.length != _kCaKeyLen) continue;
+        out[domain] = bytes;
+      } catch (_) {
+        // skip malformed key
+      }
+    }
+    return out;
+  }
+
   /// Returns the pinned CA key for the given domain.
   ///
-  /// On first run, fetches `GET /sealed-ca` from the domain, validates the key
-  /// length, and pins it (TOFU). On subsequent runs, fetches again and compares
-  /// to the pinned value: a MISMATCH throws [SealedCaException] and pins nothing
-  /// new. If the network fetch fails but we have a pinned key, we proceed with
-  /// the pinned key (offline-tolerant).
+  /// Resolution order:
+  ///   1. OUT-OF-BAND pin (build config): absolute. Returned without a fetch;
+  ///      a network key that disagrees is irrelevant (and if fetched, must
+  ///      match or we fail closed). The relay cannot rotate or kill-switch a
+  ///      domain pinned this way — R3-2's structural fix.
+  ///   2. TOFU pin (first-use): fetch `GET /sealed-ca`, validate length, pin.
+  ///   3. Subsequent runs: fetch again and compare to the pinned value.
+  ///        - identical → ok.
+  ///        - DIFFERENT but the response carries a rotation proof
+  ///          (prev_public_key == our pin AND rotation_sig verifies under the
+  ///          pin over the new key) → adopt the new key and re-pin. This is a
+  ///          SIGNED rotation: the relay proved possession of the OLD private
+  ///          key, so it is not the silent-swap / kill-switch case.
+  ///        - DIFFERENT with no valid proof → [SealedCaException], pin
+  ///          nothing new (possible compromise / MITM / unsigned rotation).
+  /// If the network fetch fails but we have a pinned (or OOB) key, proceed
+  /// with it (offline-tolerant).
   Future<Uint8List> getCaKeyForDomain(String domain) async {
-    final pinKey = '$_kPinKey.$domain';
-    final pinned = await _loadPinned(pinKey);
+    final canonical = domain.toLowerCase();
+    final oob = _oobPins[canonical];
+    final pinKey = '$_kPinKey.$canonical';
+    final pinned = oob ?? await _loadPinned(pinKey);
 
-    Uint8List? fetched;
+    _SealedCaResponse? fetched;
     try {
-      fetched = await _fetchCaKey(domain);
+      fetched = await _fetchCaKey(canonical);
     } catch (_) {
-      // Network/parse failure. If we already have a pinned key, use it; the
-      // CA key is long-lived and pinned, so a transient fetch failure must
-      // not block sealed messaging. With no pinned key there is nothing to
-      // fall back to — fail closed.
+      // Network/parse failure. If we already have a pinned (or OOB) key, use
+      // it; the CA key is long-lived and pinned, so a transient fetch failure
+      // must not block sealed messaging. With nothing pinned, fail closed.
       if (pinned == null) {
-        throw SealedCaException('CA key unavailable and none pinned for $domain');
+        throw SealedCaException('CA key unavailable and none pinned for $canonical');
       }
       return pinned;
     }
 
-    if (pinned == null) {
-      await _storage.write(key: pinKey, value: base64Encode(fetched));
-      return fetched;
+    // Out-of-band pin is authoritative: never overwrite it, and a served key
+    // that disagrees is a red flag we surface rather than trust.
+    if (oob != null) {
+      if (!_bytesEqual(oob, fetched.publicKey)) {
+        throw SealedCaException(
+            'served CA key disagrees with out-of-band pin for $canonical');
+      }
+      return oob;
     }
 
-    if (!_bytesEqual(pinned, fetched)) {
-      // Pinned-vs-served mismatch: possible relay compromise / MITM. Do not
-      // update the pin, do not trust the new key. Surface a generic error.
-      throw SealedCaException('CA key changed since first use for $domain');
+    if (pinned == null) {
+      await _storage.write(key: pinKey, value: base64Encode(fetched.publicKey));
+      return fetched.publicKey;
     }
-    return pinned;
+
+    if (_bytesEqual(pinned, fetched.publicKey)) {
+      return pinned;
+    }
+
+    // Pinned-vs-served mismatch. Only acceptable via a SIGNED rotation: the
+    // response must carry a proof that the holder of the key we ALREADY
+    // trust authorised this new key. Anything else (no proof, prev key isn't
+    // ours, bad signature) is a silent swap / kill-switch attempt — fail
+    // closed and keep the old pin.
+    if (_rotationProofValid(pinned: pinned, resp: fetched)) {
+      await _storage.write(key: pinKey, value: base64Encode(fetched.publicKey));
+      return fetched.publicKey;
+    }
+
+    throw SealedCaException('CA key changed without valid rotation proof for $canonical');
+  }
+
+  /// Verifies a signed CA rotation: prev_public_key must equal the key we
+  /// already pinned, and rotation_sig must be a valid Ed25519 signature by
+  /// that pinned key over the NEW public key bytes. Any missing/malformed
+  /// field returns false (fail closed) — an unsigned change is never adopted.
+  bool _rotationProofValid({
+    required Uint8List pinned,
+    required _SealedCaResponse resp,
+  }) {
+    final prev = resp.prevPublicKey;
+    final sig = resp.rotationSig;
+    if (prev == null || sig == null) return false;
+    // The proof must chain from the EXACT key we trust today.
+    if (!_bytesEqual(prev, pinned)) return false;
+    try {
+      return ed.verify(ed.PublicKey(pinned), resp.publicKey, sig);
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<Uint8List?> _loadPinned(String pinKey) async {
@@ -105,7 +197,7 @@ class SealedCaService {
     }
   }
 
-  Future<Uint8List> _fetchCaKey(String domain) async {
+  Future<_SealedCaResponse> _fetchCaKey(String domain) async {
     final url = _httpUrlForDomain(domain);
     final client = HttpClient();
     try {
@@ -129,7 +221,29 @@ class SealedCaService {
       if (bytes.length != _kCaKeyLen) {
         throw const SealedCaException('sealed-ca key bad length');
       }
-      return bytes;
+      // Optional signed-rotation fields. Tolerated as absent; validated only
+      // for length here (signature check happens in _rotationProofValid).
+      Uint8List? prevPub;
+      Uint8List? rotSig;
+      final prevRaw = json['prev_public_key'];
+      final sigRaw = json['rotation_sig'];
+      if (prevRaw is String && prevRaw.isNotEmpty) {
+        try {
+          final p = base64Decode(prevRaw);
+          if (p.length == _kCaKeyLen) prevPub = p;
+        } catch (_) {/* ignore malformed proof field */}
+      }
+      if (sigRaw is String && sigRaw.isNotEmpty) {
+        try {
+          final sgn = base64Decode(sigRaw);
+          if (sgn.length == 64) rotSig = sgn;
+        } catch (_) {/* ignore malformed proof field */}
+      }
+      return _SealedCaResponse(
+        publicKey: bytes,
+        prevPublicKey: prevPub,
+        rotationSig: rotSig,
+      );
     } on SocketException catch (e) {
       throw SealedCaException('network: ${e.osError?.errorCode ?? 0}');
     } finally {
@@ -155,4 +269,20 @@ class SealedCaService {
     }
     return diff == 0;
   }
+}
+
+/// Parsed `/sealed-ca` response: the current CA public key plus the optional
+/// signed-rotation proof (previous public key + Ed25519 signature over the
+/// new key, made by the previous key). The proof fields are null when the
+/// relay serves a first-generation key.
+class _SealedCaResponse {
+  final Uint8List publicKey;
+  final Uint8List? prevPublicKey;
+  final Uint8List? rotationSig;
+
+  const _SealedCaResponse({
+    required this.publicKey,
+    required this.prevPublicKey,
+    required this.rotationSig,
+  });
 }

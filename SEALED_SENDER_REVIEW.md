@@ -163,4 +163,31 @@ seal/open math). New items below; "fixed" ones were applied to the core
 Anonymous upload channel (sealed blobs are still uploaded over the
 authenticated WS → TCP-level sender correlation by the relay; needs a
 separate unauthenticated transport — see `relay_service.dart` header),
-message-size padding, cover traffic.
+cover traffic. (Message-size padding for the FIRST-CONTACT type oracle is now
+addressed — see §9 R3-4 — but full traffic shaping for arbitrary-length
+messages remains out of scope.)
+
+## 9. Third pass (round 3) — findings and disposition
+
+A third independent adversarial pass (full notes in the round-3 review
+memo) confirmed the seal/open primitive layer is sound and surfaced
+architectural + correctness items. Disposition below; "FIXED" items have
+code + tests landed this session.
+
+| ID | Sev | Status | Disposition |
+|----|-----|--------|-------------|
+| R3-1 | HIGH | OPEN (architectural) | "Decouple the CA" is insufficient on its own: the relay also owns registration + the prekey directory, so a separate CA fed by relay-served bundles is still forgeable. The real fix moves the uid↔ik registration authority OFF the relay (a separate directory service), demoting the relay to a dumb pipe that cannot serve bundles. Not closeable in a patch — this is the headline agenda item for the external/architectural review. Interim mitigation landed: out-of-band CA pin (see R3-2) removes the relay's ability to be its own pinned authority for configured deployments. |
+| R3-2 | HIGH | **FIXED** | CA-rotation kill switch + no safe rotation path. (a) Client now accepts a changed CA key ONLY if the `/sealed-ca` response carries a rotation proof — `prev_public_key` == the pinned key AND `rotation_sig` = Ed25519(oldPriv, newPub) verifies under the pinned key (`SealedCaService._rotationProofValid`); an unsigned change still fails closed. Relay mints the proof from a `<path>.prev` file (`SealedCA` rotation, `/sealed-ca` serves it). (b) Out-of-band CA pin via `--dart-define=SPECTRE_SEALED_CA=domain:b64` (`SealedCaService.parseOobPins`, wired in `main.dart`): an OOB-pinned domain never TOFU-trusts the relay and a served key that disagrees fails closed. Tests: `sealed_ca_test.go` (signed rotation: proof verifies under old key, NOT under new key, stable across reload), `round3_hardening_test.dart` (OOB pin parsing). |
+| R3-3 | HIGH | PARTIAL (UI done, arch open) | Verification-before-attribution. The UI side is largely in place from NEW-HIGH-1: unverified state renders in danger-red as "sender identity is a relay claim", first-contact is a loud non-dismissible-as-trusted banner, key-change is sticky red. STILL the architectural residual of R3-1: first-contact MITM is undetectable in-band (same as Signal); only out-of-band safety-number compare anchors trust. Making verification strictly MANDATORY before any "secure" affordance (vs. reachable) is the remaining UX-rigor item. |
+| R3-4 | MED | **FIXED** | First-contact size oracle. Sealed inner is now length-prefixed and zero-padded to a 1024-byte bucket before AEAD (`SealedSender._padInner`/`_unpadInner`), so a first-contact PreKey envelope and an established-session Whisper envelope are not size-distinguishable up to the bucket. Test: `round3_hardening_test.dart` (two small inners → equal blob length; round-trip; bucket-multiple overflow). |
+| R3-5 | MED | **FIXED** | Unauthenticated OTPK drain → forward-secrecy downgrade. `/prekeys/{id}` is now per-TARGET rate-limited; over budget it serves the static bundle WITHOUT consuming an OTPK — byte-shape-identical to the legitimate exhausted fallback, so no new oracle (`prekeyLimiter`, `getBundleWithOTPK`). Test: `prekey_throttle_test.go`. |
+| R3-6 | MED | **FIXED** | The outer AEAD is NOT an unconditional "auth gate": the libsignal-java-lineage `Curve.calculateAgreement` does not reject the all-zero/small-order result. `_deriveKey` now rejects an all-zero `dh` (constant-time) and the doc comments were corrected to state the outer layer is recipient-bound confidentiality, with the inner cert+ratchet as the actual authentication. |
+| R3-7 | MED | **FIXED (detection)** | Hash dedup ≠ stream integrity — a relay can silently drop/withhold/reorder. Added a per-conversation monotonic sequence carried INSIDE the E2E payload (`{v:1,...,s:<seq>}`), claimed atomically per send (`claimNextOutboundSeq`), with forward-gap detection on receive (`decideSeqGap`, schema v5 `lastInboundSeq`). A gap surfaces a sticky `_SuppressionGapBanner` (decay-red, distinct from impersonation-red). Detection only — the dropped message cannot be recovered. Test: `round3_hardening_test.dart` (in-order / gap / off-by-one / reorder / legacy-seqless). |
+| R3-8 | LOW | NOTE | H4's transcript commitment is a transcript check, not AEAD key-commitment — true, and key-commitment isn't needed in this 1:1 receiver-derives-key model. Docs no longer claim it addresses non-committing AEAD; its value is cert-envelope binding. |
+| R3-9 | LOW | NOTE | Cert `exp` is near-vestigial (cert rides confidentially inside the AEAD; relay-as-CA can re-mint), so the H2 "device-clock residual" is correctly LOW, not blocking. |
+| R3-10 | LOW | NOTE | The raw-32 vs 0x05-tagged representation of eph_pub/recip_pub in the HKDF IKM is exercised by the seal→open round-trip + the Go→Dart golden vector; a silent representation mismatch fails closed (AEAD won't decrypt) and never "tries both". |
+| R3-11 | INFO | NOTE | A client self-signature binding uid↔ik does not fix R3-1 (the attacker signs its own ik for the victim's uid — circular). Confirms no in-band crypto fix; only out-of-band verification or off-relay registration works. |
+
+### Round-3 blocking items still open
+1. **R3-1 / R3-3 (architectural):** move registration authority off the relay (separate directory service) and make out-of-band verification mandatory-before-attribution in the product, not merely reachable. The OOB CA pin (R3-2) is the landed interim; the structural fix is an external-review agenda item.
+2. **External cryptographer review** of the bespoke construction AND the relay-as-CA/registration architecture — unchanged gate, not substituted by any internal pass.

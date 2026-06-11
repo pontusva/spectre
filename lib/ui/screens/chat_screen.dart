@@ -77,6 +77,12 @@ class _ChatScreenState extends State<ChatScreen> {
   // inverted friction). The banner clears only by completing out-of-band
   // verification (_verified flips true).
   bool _firstContact = false;
+  // Sticky once a message reports a SEQUENCE GAP (R3-7): the relay dropped or
+  // withheld at least one earlier message from this peer. The Double Ratchet
+  // can't surface that, so the per-conversation counter inside the encrypted
+  // payload is what catches it. Detection only — the missing message can't be
+  // recovered — so this warns and stays until the user leaves the chat.
+  bool _suppressionGap = false;
   // Out-of-band verification state for this peer, read from the contact row.
   // The real trust anchor: a verified safety number is the only thing that
   // distinguishes the genuine peer from a relay-as-CA MITM on first contact.
@@ -161,6 +167,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       if (dm.senderKeyChanged) _keyChanged = true;
       if (dm.senderFirstContact) _firstContact = true;
+      if (dm.senderSuppressionGap) _suppressionGap = true;
       if (_knownIds.add(dm.id)) {
         _items.add(_ChatItem(
           id: dm.id,
@@ -340,6 +347,7 @@ class _ChatScreenState extends State<ChatScreen> {
               if (_firstContact && !_verified)
                 _FirstContactBanner(onTap: _openContact),
               if (_keyChanged) const _KeyChangedBanner(),
+              if (_suppressionGap) const _SuppressionGapBanner(),
               Expanded(child: _buildList()),
               if (_sessionState == _SessionState.peerNotFound)
                 const _PeerNotFoundBanner(),
@@ -522,6 +530,61 @@ class _KeyChangedBanner extends StatelessWidget {
               'reinstall, or an attacker on the relay.',
               style: SpectreTypography.mono().copyWith(
                 color: SpectreColors.redDanger,
+                fontSize: 12,
+                height: 1.5,
+                letterSpacing: 0.6,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Persistent banner shown when an inbound message's per-conversation sequence
+/// number jumped forward past the next expected value (R3-7): the untrusted
+/// relay dropped, withheld, or reordered at least one earlier message from
+/// this peer. Styled in decay-red, deliberately DISTINCT from the impersonation
+/// danger-red of the key-change / first-contact banners: this is an integrity
+/// / availability signal (the relay is censoring or partitioning the stream),
+/// not an "is this really them" signal. Detection only — the dropped message
+/// can't be recovered — so the copy tells the user what happened and to
+/// confirm out of band rather than implying a fix.
+class _SuppressionGapBanner extends StatelessWidget {
+  const _SuppressionGapBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      decoration: const BoxDecoration(
+        color: SpectreColors.blackLess,
+        border: Border(
+          top: BorderSide(color: SpectreColors.redDecay, width: 1),
+          bottom: BorderSide(color: SpectreColors.redDecay, width: 1),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            SpectreIcons.warning,
+            style: SpectreTypography.mono().copyWith(
+              color: SpectreColors.redDecay,
+              fontSize: 12,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'message gap detected — at least one earlier message from this '
+              'peer was dropped or withheld in transit. the relay is '
+              'untrusted and can suppress messages; confirm out of band if '
+              'this matters.',
+              style: SpectreTypography.mono().copyWith(
+                color: SpectreColors.redDecay,
                 fontSize: 12,
                 height: 1.5,
                 letterSpacing: 0.6,

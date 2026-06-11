@@ -69,6 +69,16 @@ class DecryptedMessage {
   /// inverted friction, see finding 2 of the sealed-sender review).
   final bool senderFirstContact;
 
+  /// True when the per-conversation monotonic sequence carried inside the E2E
+  /// payload jumped FORWARD past the next expected value — i.e. at least one
+  /// earlier message from this peer was dropped, withheld, or reordered by
+  /// the (untrusted) relay (R3-7). Detection only: the Double Ratchet can't
+  /// surface relay-side suppression, so a counter inside the encrypted body
+  /// is the cheapest way to NOTICE a gap. The UI warns; it cannot recover the
+  /// missing message. False for in-order delivery, legacy (seq-less)
+  /// messages, and the first message in a conversation.
+  final bool senderSuppressionGap;
+
   const DecryptedMessage({
     required this.id,
     required this.senderId,
@@ -77,6 +87,7 @@ class DecryptedMessage {
     required this.timestamp,
     this.senderKeyChanged = false,
     this.senderFirstContact = false,
+    this.senderSuppressionGap = false,
   });
 }
 
@@ -207,13 +218,21 @@ class MessageService {
       throw StateError('MessageService has been wiped');
     }
 
+    // Resolve the conversation first so we can claim a per-conversation
+    // outbound sequence number BEFORE encrypting (the seq rides inside the
+    // E2E payload). _ensureConversation is idempotent and cheap.
+    final conversationId =
+        await _ensureConversation(recipientId, incoming: false);
+    final int seq = await _db.claimNextOutboundSeq(conversationId);
+
     final String ciphertextB64;
     try {
-      // Wrap our own display name in with the text (E2E only — the relay
-      // never sees it) so the recipient can show our name instead of the raw
-      // id. The DB/cache below store just the text, never the wrapper.
+      // Wrap our own display name + the monotonic seq in with the text (E2E
+      // only — the relay never sees any of it) so the recipient can show our
+      // name and detect a dropped/withheld message (R3-7). The DB/cache below
+      // store just the text, never the wrapper.
       final myName = await _identity.displayName();
-      final payload = _encodeOutgoing(myName, plaintext);
+      final payload = _encodeOutgoing(myName, plaintext, seq);
       ciphertextB64 = await _sessions.encryptMessage(recipientId, payload);
     } catch (e) {
       _log('encrypt failed for ${_redactId(recipientId)} :: ${e.runtimeType}');
@@ -222,8 +241,6 @@ class MessageService {
 
     final messageId = _uuid.v4();
     final identity = await _identity.loadOrCreate();
-    final conversationId =
-        await _ensureConversation(recipientId, incoming: false);
     final now = DateTime.now().toUtc();
 
     // The local DB always stores the inner ratchet ciphertext, never the wire
@@ -554,6 +571,7 @@ class MessageService {
     final decoded = payload == null ? null : _decodeIncoming(payload);
     final String? plaintext = decoded?.text;
     final String? peerName = decoded?.name;
+    final int? inboundSeq = decoded?.seq;
 
     try {
       await _db.insertMessage(Message(
@@ -605,6 +623,29 @@ class MessageService {
       } catch (_) {/* contact row may not exist yet */}
     }
 
+    // R3-7: suppression/reorder detection from the per-conversation seq inside
+    // the (now decrypted) payload. A forward jump past the next expected seq
+    // means the relay dropped/withheld at least one earlier message. Detection
+    // only; best-effort, never blocks delivery. We advance the stored
+    // high-water mark so the gap is reported once, not on every later message.
+    var senderSuppressionGap = false;
+    try {
+      final lastSeq = await _db.lastInboundSeq(conversationId);
+      final decision = decideSeqGap(lastSeq, inboundSeq);
+      senderSuppressionGap = decision.gap;
+      if (decision.advance != lastSeq) {
+        await _db.updateLastInboundSeq(conversationId, decision.advance);
+      }
+      if (decision.gap) {
+        _log(
+          'SECURITY: inbound seq gap from ${_redactId(fullSenderId)} '
+          '— at least one earlier message dropped/withheld by the relay',
+        );
+      }
+    } catch (e) {
+      _log('seq gap check failed :: ${e.runtimeType}');
+    }
+
     if (!_decryptedController.isClosed) {
       _decryptedController.add(DecryptedMessage(
         id: messageId,
@@ -614,6 +655,7 @@ class MessageService {
         timestamp: timestamp,
         senderKeyChanged: senderKeyChanged,
         senderFirstContact: senderFirstContact,
+        senderSuppressionGap: senderSuppressionGap,
       ));
     }
   }
@@ -628,6 +670,28 @@ class MessageService {
     if (storedB64.isEmpty) return IdentityPinDecision.pinFirstUse;
     if (storedB64 == currentB64) return IdentityPinDecision.matched;
     return IdentityPinDecision.changed;
+  }
+
+  /// Pure suppression/reorder decision for an inbound seq (R3-7). No I/O so
+  /// it is directly unit-testable.
+  ///
+  /// [lastSeq] is the highest inbound seq accepted so far (0 = none yet);
+  /// [incoming] is the seq carried in this message, or null for a legacy
+  /// (seq-less) message. Returns:
+  ///   * gap=false, advance=incoming when in order (incoming == lastSeq+1, or
+  ///     the first seq we've seen).
+  ///   * gap=TRUE, advance=incoming when incoming > lastSeq+1 — at least one
+  ///     earlier message was dropped/withheld. We still advance so we don't
+  ///     re-warn on every later message; the gap is reported once.
+  ///   * gap=false, advance=lastSeq when incoming <= lastSeq (a reorder/old
+  ///     message arriving late, or a legacy seq-less message) — nothing to
+  ///     warn about here beyond what dedup already handles, and we never move
+  ///     the high-water mark backwards.
+  static ({bool gap, int advance}) decideSeqGap(int lastSeq, int? incoming) {
+    if (incoming == null) return (gap: false, advance: lastSeq);
+    if (incoming <= lastSeq) return (gap: false, advance: lastSeq);
+    final gap = incoming > lastSeq + 1;
+    return (gap: gap, advance: incoming);
   }
 
   /// Canonicalizes a relay domain (host or host:port) for use as a TRUST
@@ -778,24 +842,32 @@ class MessageService {
 
   /// Wraps the sender's display name + text into the plaintext that gets
   /// ratchet-encrypted. Versioned JSON so the receiver tells it apart from a
-  /// legacy raw-text message. Name omitted when unset.
-  String _encodeOutgoing(String? name, String text) {
-    final m = <String, Object?>{'v': 1, 't': text};
+  /// legacy raw-text message. Name omitted when unset. [seq] is the
+  /// per-conversation monotonic outbound sequence (R3-7), always present in
+  /// v1 messages this build sends.
+  String _encodeOutgoing(String? name, String text, int seq) {
+    final m = <String, Object?>{'v': 1, 't': text, 's': seq};
     if (name != null && name.isNotEmpty) m['n'] = name;
     return jsonEncode(m);
   }
 
   /// Inverse of [_encodeOutgoing]. A legacy/raw message (no v:1 wrapper, e.g.
-  /// from an older peer build) decodes as text with no name.
-  ({String? name, String text}) _decodeIncoming(String raw) {
+  /// from an older peer build) decodes as text with no name and no seq
+  /// (seq=null → the receiver skips gap detection for it).
+  ({String? name, String text, int? seq}) _decodeIncoming(String raw) {
     try {
       final m = jsonDecode(raw);
       if (m is Map<String, dynamic> && m['v'] == 1 && m['t'] is String) {
         final n = m['n'];
-        return (name: n is String ? n : null, text: m['t'] as String);
+        final s = m['s'];
+        return (
+          name: n is String ? n : null,
+          text: m['t'] as String,
+          seq: s is int ? s : (s is num ? s.toInt() : null),
+        );
       }
     } catch (_) {/* not our wrapper — treat as raw text */}
-    return (name: null, text: raw);
+    return (name: null, text: raw, seq: null);
   }
 
   Future<void> _onRelayFrame(Map<String, dynamic> envelope) async {

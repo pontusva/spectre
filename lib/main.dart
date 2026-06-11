@@ -29,6 +29,20 @@ const String _kRelayUrlRaw = String.fromEnvironment(
   defaultValue: 'wss://relay.invalid',
 );
 
+// Optional out-of-band sealed-sender CA pin(s), shipped in the build so a
+// fresh install does not TOFU-trust whatever key the (untrusted) relay first
+// serves, and so the relay cannot use CA rotation as a network-wide kill
+// switch (sealed-sender review finding R3-2). Format: comma-separated
+// `domain:base64key`, e.g.
+//   --dart-define=SPECTRE_SEALED_CA=relay.example:Base64Key==
+// Empty by default (pure TOFU — acceptable for dev, NOT for an
+// activists-vs-state deployment, where this SHOULD be set to a
+// reproducible-build-verifiable value).
+const String _kSealedCaPinsRaw = String.fromEnvironment(
+  'SPECTRE_SEALED_CA',
+  defaultValue: '',
+);
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
@@ -165,7 +179,10 @@ class _SpectreAppState extends State<SpectreApp> with WidgetsBindingObserver {
       );
       relayService.attachPrekeyService(prekeyService);
 
-      final sealedCaService = SealedCaService(relayUrl: relayUri);
+      final sealedCaService = SealedCaService(
+        relayUrl: relayUri,
+        outOfBandPins: SealedCaService.parseOobPins(_kSealedCaPinsRaw),
+      );
       try {
         // Pre-fetch the local relay's CA key to fail early if there's a mismatch
         // or network issue, though MessageService will fetch per-domain anyway.

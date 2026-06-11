@@ -103,6 +103,20 @@ class Conversations extends Table {
   IntColumn get requestState =>
       integer().withDefault(const Constant(0))();
 
+  // Per-conversation monotonic sequence counters for tamper/suppression
+  // detection (sealed-sender review R3-7). nextOutboundSeq is the seq to
+  // stamp on the NEXT message we send this peer (starts at 1). lastInboundSeq
+  // is the highest seq we have accepted from them (0 = none yet). The relay
+  // is a dumb pipe and could silently drop / withhold / reorder messages; the
+  // Double Ratchet doesn't surface that. Carrying a monotonic counter INSIDE
+  // the E2E payload lets the receiver notice a gap (missing seq) and warn —
+  // detection, not prevention, which is the achievable goal against an
+  // untrusted relay. Defaults keep every pre-migration row consistent.
+  IntColumn get nextOutboundSeq =>
+      integer().withDefault(const Constant(1))();
+  IntColumn get lastInboundSeq =>
+      integer().withDefault(const Constant(0))();
+
   @override
   Set<Column> get primaryKey => {id};
 }
@@ -212,7 +226,7 @@ class SecureDatabase extends _$SecureDatabase {
   File? _dbFile;
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -235,6 +249,14 @@ class SecureDatabase extends _$SecureDatabase {
           // nickname or truncated id.
           if (from < 4) {
             await m.addColumn(contacts, contacts.peerName);
+          }
+          // v4 -> v5: add conversations.nextOutboundSeq / lastInboundSeq for
+          // R3-7 suppression/reorder detection. Defaults (1 / 0) make every
+          // existing conversation behave as if it starts a fresh seq stream;
+          // the first message after upgrade on each side re-anchors it.
+          if (from < 5) {
+            await m.addColumn(conversations, conversations.nextOutboundSeq);
+            await m.addColumn(conversations, conversations.lastInboundSeq);
           }
         },
       );
@@ -424,6 +446,44 @@ class SecureDatabase extends _$SecureDatabase {
   ) {
     return (update(conversations)..where((c) => c.id.equals(conversationId)))
         .write(ConversationsCompanion(requestState: Value(state.index)));
+  }
+
+  /// Atomically reads and increments the per-conversation outbound sequence
+  /// counter, returning the seq to stamp on THIS outgoing message (R3-7).
+  /// Runs in a transaction so two concurrent sends can't claim the same seq.
+  /// Returns 1 (and leaves the row at 2) for the first message, etc. If the
+  /// conversation row is somehow missing, returns 1 without persisting — the
+  /// caller still sends; seq integrity is best-effort detection, never a
+  /// send-blocker.
+  Future<int> claimNextOutboundSeq(String conversationId) async {
+    return transaction(() async {
+      final row = await (select(conversations)
+            ..where((c) => c.id.equals(conversationId))
+            ..limit(1))
+          .getSingleOrNull();
+      if (row == null) return 1;
+      final seq = row.nextOutboundSeq;
+      await (update(conversations)..where((c) => c.id.equals(conversationId)))
+          .write(ConversationsCompanion(nextOutboundSeq: Value(seq + 1)));
+      return seq;
+    });
+  }
+
+  /// The highest inbound seq accepted from this peer (0 = none yet), keyed by
+  /// conversation id. Used by the receive path to detect a gap (R3-7).
+  Future<int> lastInboundSeq(String conversationId) async {
+    final row = await (select(conversations)
+          ..where((c) => c.id.equals(conversationId))
+          ..limit(1))
+        .getSingleOrNull();
+    return row?.lastInboundSeq ?? 0;
+  }
+
+  /// Records the highest inbound seq accepted from this peer. Touches only
+  /// that row. The caller advances this only forward (R3-7).
+  Future<int> updateLastInboundSeq(String conversationId, int seq) {
+    return (update(conversations)..where((c) => c.id.equals(conversationId)))
+        .write(ConversationsCompanion(lastInboundSeq: Value(seq)));
   }
 
   // -------------------------------------------------------------------------

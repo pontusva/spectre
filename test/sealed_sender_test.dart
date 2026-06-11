@@ -385,6 +385,24 @@ void main() {
     final aead = Chacha20.poly1305Aead();
     final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
 
+    // Mirrors SealedSender._padInner: frame as [uint32 be len][inner][zero pad]
+    // rounded up to the 1024-byte bucket. The manual-construction tests below
+    // must pad exactly like seal() or open()'s _unpadInner will reject the
+    // frame before the commitment checks they are trying to exercise run.
+    Uint8List padInner(Uint8List inner) {
+      const bucket = 1024;
+      final framed = 4 + inner.length;
+      final total = ((framed + bucket - 1) ~/ bucket) * bucket;
+      final out = Uint8List(total);
+      final len = inner.length;
+      out[0] = (len >> 24) & 0xFF;
+      out[1] = (len >> 16) & 0xFF;
+      out[2] = (len >> 8) & 0xFF;
+      out[3] = len & 0xFF;
+      out.setRange(4, 4 + inner.length, inner);
+      return out;
+    }
+
     Future<Uint8List> deriveKeyHelper(
       Uint8List dh,
       Uint8List ephPub,
@@ -432,7 +450,7 @@ void main() {
 
       final nonce = aead.newNonce();
       final box = await aead.encrypt(
-        badInner,
+        padInner(Uint8List.fromList(badInner)),
         secretKey: SecretKey(keyBytes),
         nonce: nonce,
         aad: utf8.encode(recipientUid), // valid AAD to pass outer decryption
@@ -485,7 +503,7 @@ void main() {
 
       final nonce = aead.newNonce();
       final box = await aead.encrypt(
-        badInner,
+        padInner(Uint8List.fromList(badInner)),
         secretKey: SecretKey(keyBytes),
         nonce: nonce,
         aad: utf8.encode(recipientUid),
