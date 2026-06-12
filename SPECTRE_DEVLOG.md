@@ -771,14 +771,21 @@ PreKeySignalMessage.getIdentityKey()` binding is now enforced:
   `MessageService.receiveMessage` calls it after `open()` and BEFORE
   decrypt/session-init. Tested in `test/c2_binding_test.dart`
   (match / mismatch / WHISPER no-op against a real X3DH PreKey message).
-- **H1 (MUST fix) — OPEN.** Cert is a 24h bearer token not bound to the
-  envelope; combined with C2 a leaked/observed cert is re-stapleable.
-  Bind it: include a digest of (eph_pub || recipient_id || inner-ct) in the
-  AEAD-protected inner structure and verify on open; and/or shorten TTL.
-- **H2 (MUST fix) — OPEN.** Expiry trusts a caller-supplied clock and there
-  is no replay cache; a relay can redeliver a sealed PreKey blob to force
-  repeated session resets / prekey consumption. Use a trusted clock, reject
-  skew, add a short replay cache keyed on (eph_pub, nonce).
+- **H1 (MUST fix) — FIXED (via H4 transcript commitment).** The cert is no
+  longer an extractable bearer token: it rides INSIDE the AEAD (encrypted to
+  the recipient, key bound to eph_pub, AAD bound to recipient_id), and
+  `open()` verifies an in-AEAD commitment to `eph_pub` + `recip_id`
+  (`sealed_sender.dart` open(): a mismatch on either → drop). C2 separately
+  stops a cert-holder from stapling it onto someone else's PreKey message.
+  See SEALED_SENDER_REVIEW.md H1/H4 and R3-8 (it is a transcript commitment,
+  not AEAD key-commitment — which isn't needed in this 1:1 model).
+- **H2 (MUST fix) — MOSTLY FIXED.** Replay cache is now implemented:
+  `MessageService.receiveMessage` drops any inbound whose content-hash id
+  already exists (in-memory `_seenMessageIds` + PERSISTENT `_db.messageExists`)
+  BEFORE decrypt, so a relay redelivering an old sealed PreKey blob — even
+  across a restart — can't re-drive session setup / prekey consumption.
+  RESIDUAL (LOW, not blocking — see R3-9): expiry still trusts the device
+  clock; there is no trusted offline time source.
 - **M1 (fail-closed contract) — FIXED.** ECDH / point-decode in open() and
   seal() now convert ArgumentError/InvalidKeyException to
   SealedSenderException (added a malformed-blob test).
@@ -795,20 +802,63 @@ code-interop) — full consolidated table in SEALED_SENDER_REVIEW.md §5b:
 - FIXED in core: M-NEW-2 (cert base64 fail-closed), M-NEW-4 (accept num exp
   for Dart-web), L-NEW-1 (double-unmarshal), H-NEW-1 (added Go→Dart Ed25519
   golden vector + more fail-closed tests; now 11 Dart + 2 Go tests green).
-- NEW-HIGH-1 (PARTIAL): identity-key TOFU pinning + change detection now
-  implemented (message_service.\_checkAndPinIdentity / decideIdentityPin,
+- NEW-HIGH-1 (ADDRESSED): identity-key TOFU pinning + change detection + UI
+  all implemented (message_service.\_checkAndPinIdentity / decideIdentityPin,
   SecureDatabase.updateConversationKey, DecryptedMessage.senderKeyChanged;
-  unit-tested). Pins the peer's session identity key on first contact, flags
-  - marks-unverified on a later change. STILL OPEN: UI must surface
-    senderKeyChanged; first-contact trust still needs the out-of-band
-    fingerprint check (detection catches changes, not a first-contact MITM).
+  unit-tested in test/identity_pin_test.dart). Pins the peer's session
+  identity key on first contact, marks-unverified on a later change, and
+  chat_screen surfaces senderKeyChanged as a sticky red banner with a
+  reachable verify bar / safety-number screen. RESIDUAL (inherent): a
+  FIRST-CONTACT MITM is undetectable in-band — trust still rests on the
+  out-of-band fingerprint compare (same as Signal). See R3-3.
 - H3/H4 (reviewer decision, FIXED): moved public keys into HKDF IKM (H3) and
   added in-AEAD transcript commitment (H4/H1).
 - M4 (reviewer decision, FIXED): folded length-prefixed `recipient_id` into HKDF info context.
 - FED-1 (FIXED): Cross-domain sender identity forgery via spoofed X-Spectre-Relay-ID on the unauthenticated `/federation/deliver` endpoint. Identity AND reply routing both now derive from the signed `cert.iss`; the `federation_sender_relay` header is only validated for agreement and never trusted on its own. `iss` is canonicalized (lowercased, structurally validated host[:port]) before being used as a CA pin key or fetch host, and `open()` refuses a cert whose `iss` differs from the issuer its CA key was resolved for.
 
 NOTE: this internal+agent review reduces but does NOT replace an EXTERNAL
-cryptographer review. C2/H1/H2/NEW-HIGH-1 are blocking for production.
+cryptographer review. C2/H1/H4/NEW-HIGH-1 are now implemented and H2's replay
+cache is in (device-clock residual is LOW, R3-9). The remaining blocking gate
+is the external cryptographer review + the relay-as-CA / on-relay registration
+architecture (R3-1) — see the third-pass section below and SEALED_SENDER_REVIEW.md §9.
+
+### Third pass (round 3) — landed since the findings above were first written
+
+A third adversarial pass (full table in SEALED_SENDER_REVIEW.md §9) judged the
+seal/open primitive layer sound and drove the following code, none of which
+existed when the Session-3 findings above were written:
+
+- R3-2 (FIXED): cryptographically-verified CA rotation (signed
+  `prev_public_key` + `rotation_sig` — SealedCaService.\_rotationProofValid /
+  Go SealedCA, served at `/sealed-ca`) + build-time out-of-band CA pins
+  (`--dart-define=SPECTRE_SEALED_CA=domain:b64`, SealedCaService.parseOobPins,
+  wired in main.dart). A CA-key change with no valid rotation proof still
+  fails closed; an OOB-pinned domain never TOFU-trusts the relay.
+- R3-4 (FIXED): first-contact size oracle — the inner plaintext is
+  length-prefixed and zero-padded to a 1024-byte bucket
+  (SealedSender.\_padInner/\_unpadInner) so a PreKey and a Whisper envelope are
+  size-indistinguishable up to a bucket.
+- R3-5 (FIXED): unauthenticated OTPK-drain throttle on `/prekeys/{id}` (Go
+  prekeyLimiter / getBundleWithOTPK) — over budget serves the static bundle
+  WITHOUT consuming a one-time prekey (byte-shape-identical to the exhausted
+  fallback, so no new oracle).
+- R3-6 (FIXED): reject the all-zero / small-order ECDH result (constant-time)
+  in \_deriveKey; the outer AEAD is now documented as recipient-bound
+  confidentiality, NOT an auth gate (the inner cert + ratchet is the auth).
+- R3-7 (FIXED, detection only): a per-conversation monotonic sequence carried
+  INSIDE the E2E payload (claimNextOutboundSeq / decideSeqGap) with forward-gap
+  detection + a sticky suppression-gap banner. A dropped message can't be
+  recovered, only detected.
+- R3-1 / R3-3 (OPEN, architectural): registration authority still lives on the
+  relay; a first-contact MITM is only defeated by out-of-band verification.
+  This is the headline external-/architectural-review agenda item.
+
+TEST DEBT (round 3): the round-3 client hardening is IMPLEMENTED but largely
+UNTESTED. SEALED_SENDER_REVIEW.md §9 referenced a `test/round3_hardening_test.dart`
+(for R3-2 OOB-pin parsing, R3-4 padding, R3-7 seq-gap) and a relay
+`prekey_throttle_test.go` (R3-5) — NEITHER FILE WAS EVER CREATED. Go-side CA
+rotation IS tested (`sealed_ca_test.go` `TestSealedCASignedRotation`); the Dart
+round-3 paths and the Go prekey throttle are not. Writing these is the next task.
 
 ### Wiring landed (Session 3) — Sealed Sender connected end-to-end (client)
 
@@ -839,9 +889,12 @@ relay no longer needs the DEV cleartext wrapper to attribute messages. Branch
 - **Manual e2e**: see `SEALED_SENDER_TEST.md`. Relay dev launcher:
   `spectre-relay/run-dev.sh`.
 
-Still OPEN and blocking for production: H2 (trusted clock + replay cache — receive
-currently uses the device clock), NEW-HIGH-1 (pin `isVerified` to identity-key bytes;
-until then `senderId` is a CLAIM), and external cryptographer review.
+Still OPEN and blocking for production: the relay-as-CA / on-relay registration
+architecture (R3-1/R3-3 — a first-contact MITM is only defeated by out-of-band
+verification; `senderId` is a CLAIM until the identity key is fingerprint-verified)
+and the external cryptographer review. (H2's replay cache and NEW-HIGH-1's
+key-pin + verify UI have since landed; only H2's device-clock residual remains,
+classed LOW per R3-9.)
 
 ### Crypto-review checklist (MUST pass before production — do not ship unreviewed)
 
@@ -853,8 +906,12 @@ until then `senderId` is a CLAIM), and external cryptographer review.
 - [x] failure paths silent-drop + log e.runtimeType only (no envelope bytes) <-- receive wiring drops on open()/C2 failure logging e.runtimeType only; SealedSenderException.reason never surfaced (L3)
 - [~] independent review — internal author+agent pass DONE (see findings); EXTERNAL cryptographer review still required
 - [x] cert bound to envelope (H1/H4) <-- FIXED
-- [ ] replay cache & trusted clock (H2) <-- blocking
+- [~] replay cache & trusted clock (H2) <-- replay cache DONE (persistent content-hash dedup in receiveMessage, pre-decrypt); device-clock residual remains (LOW, R3-9)
 - [x] cross-language test vector: Go-signed cert verified by Dart ed25519_edwards <-- FIXED (H-NEW-1)
+- [x] CA rotation cryptographically verified + out-of-band CA pin supported (R3-2)
+- [x] first-contact size oracle padded (R3-4); OTPK-drain throttled (R3-5); degenerate-dh rejected (R3-6); suppression-gap detection (R3-7)
+- [ ] registration authority moved off the relay (R3-1/R3-3) <-- architectural, blocking
+- [ ] round-3 tests written — Dart `round3_hardening_test.dart` (padding / OOB-pin / rotation-proof / seq-gap) and Go `prekey_throttle_test.go` were referenced in the review but never created <-- test debt
 
 ---
 
@@ -880,6 +937,6 @@ until then `senderId` is a CLAIM), and external cryptographer review.
 
 ---
 
-Last updated: Session 3 (2026-05-30) — signed_prekey_id round-trip fixed; Sealed Sender wired into send/receive with C2 enforced (branch feat/sealed-sender-wiring-c2; unit-tested, e2e pending — see SEALED_SENDER_TEST.md)
-Next session: run the two-device e2e (SEALED_SENDER_TEST.md), then close H2/NEW-HIGH-1
+Last updated: 2026-06-12 — round-3 hardening landed (signed CA rotation + out-of-band CA pins, inner padding, OTPK-drain throttle, degenerate-dh rejection, suppression-gap detection); H1/H4 + C2 + NEW-HIGH-1 implemented; H2 replay cache in (device-clock residual LOW). Authoritative findings tables: SEALED_SENDER_REVIEW.md §5 / §5b / §9.
+Next: write the missing round-3 tests — Dart `round3_hardening_test.dart` (padding / OOB-pin / rotation-proof / seq-gap) and Go `prekey_throttle_test.go`, both referenced in the review but never created; run the two-device e2e (SEALED_SENDER_TEST.md); pursue R3-1/R3-3 (off-relay registration) for the external review.
 and remove the DEV wrapper before any production use; external cryptographer review still required

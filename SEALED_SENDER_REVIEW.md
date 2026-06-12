@@ -79,14 +79,14 @@ PreKey inner message, `PreKeySignalMessage.getIdentityKey()` MUST equal
 | Relay CA key + cert issuance | `spectre-relay/server/sealed_ca.go` |
 | Relay cert-request handling + `/sealed-ca` + rate limit | `spectre-relay/server/server.go` (`issueSenderCert`, `buildSenderCert`, `handleSealedCA`), `spectre-relay/server/ratelimit.go` |
 | Full design + decisions + review findings | `SPECTRE_DEVLOG.md` → "Sealed Sender — Design" |
-| Tests | client: `test/sealed_sender_test.dart` (10), `test/identity_pin_test.dart` (3); relay: `server/sealed_ca_test.go` (2) + `server/sealed_cert_test.go` (2) |
+| Tests | client: `test/sealed_sender_test.dart` (14), `test/c2_binding_test.dart` (3), `test/identity_pin_test.dart` (3); relay: `server/sealed_ca_test.go` (3, incl. signed rotation) + `server/sealed_cert_test.go` (2, incl. rate limiter). **NOT YET WRITTEN:** Dart unit tests for the round-3 client hardening (padding, OOB-pin parsing, rotation-proof verify, seq-gap) and the relay `prekey_throttle_test.go` — see §9 notes. |
 
 ## 5. Findings from the internal (author + agent) pass
 
 | ID | Severity | Status | Summary |
 |----|----------|--------|---------|
 | C1 | CRITICAL | docs fixed | Relay-as-CA can forge attribution & MITM first contact; cert is NOT auth-vs-relay. Defense = out-of-band fingerprint verification. **Confirm this framing.** |
-| C2 | CRITICAL | **IMPLEMENTED** | `cert.ik == PreKeySignalMessage.getIdentityKey()` enforced pre-decrypt, constant-time (`SessionManager.assertFirstContactIdentity`, wired in `message_service.receiveMessage`). Remaining: a dedicated mismatch-rejection *unit test* (the logic is exercised live; see M-NEW-3). |
+| C2 | CRITICAL | **IMPLEMENTED + TESTED** | `cert.ik == PreKeySignalMessage.getIdentityKey()` enforced pre-decrypt, constant-time (`SessionManager.assertFirstContactIdentity`, wired in `message_service.receiveMessage`). Dedicated unit test now exists: `test/c2_binding_test.dart` (match / mismatch / WHISPER no-op). |
 | H1 | HIGH | **EFFECTIVELY ADDRESSED** | The "24h bearer token / re-stapleable" concern is now covered by the existing construction + C2: the cert rides INSIDE the AEAD (encrypted to the recipient, key bound to eph_pub, AAD bound to recipient_id) so it isn't extractable by the relay/observers and is already bound to its envelope; and C2 stops a cert-holder from stapling it onto a forged PreKey message (would need the sender's identity private key). Residual is the C1 relay-as-CA case, which H1 never addressed. No code change warranted. |
 | H2 | HIGH | **MOSTLY ADDRESSED** | Replay now guarded by a PERSISTENT dedup: receiveMessage drops any message whose content-hash id already exists in the DB (SecureDatabase.messageExists), before decrypt — so a relay replaying an old sealed envelope after a restart can't re-drive session setup or re-notify. Reuses the existing Messages table, no new on-disk metadata. Remaining minor: expiry still trusts the device clock (no trusted offline time source) — documented, acceptable. |
 | M1 | MEDIUM | fixed | ECDH/point-decode now fail closed as `SealedSenderException` (was raw `ArgumentError`). |
@@ -145,18 +145,27 @@ seal/open math). New items below; "fixed" ones were applied to the core
 
 ## 7. What is tested (necessary, not sufficient)
 
-- Dart `sealed_sender_test` (10): seal→open round-trip + sender auth;
+- Dart `sealed_sender_test` (14): seal→open round-trip + sender auth;
   fail-closed on tampered blob, wrong recipient (AAD), expired cert, wrong CA,
-  malformed/short blob, wrong-length ik, expiry `==` boundary, non-32 CA key;
+  malformed/short blob, wrong-length ik, expiry `==` boundary, non-32 CA key,
+  cert-issuer ≠ expectedIss, verified `senderDomain`, and the H4 in-AEAD
+  commitment checks (eph_pub / recip_id mismatch → fail closed);
   **Go-signed→Dart-verified cross-language vector**.
+- Dart `c2_binding_test` (3): C2 binding (match / mismatch / WHISPER no-op).
 - Dart `identity_pin_test` (3): TOFU pin decision (first-use / matched / changed).
 - Go `sealed_ca_test` (2): cert issue→verify + tamper rejection; CA key stable
   across reloads. Go `sealed_cert_test` (2): uid/ik binding + refuse-without-
   bundle; rate-limiter budget/isolation/reset.
-- **Still missing:** a dedicated C2 mismatch-rejection unit test; malformed
+- **Still missing:** the round-3 client hardening is IMPLEMENTED but NOT yet
+  unit-tested — `_padInner`/`_unpadInner` (R3-4), `SealedCaService` OOB-pin
+  parsing + rotation-proof verify (R3-2), `decideSeqGap`/`claimNextOutboundSeq`
+  (R3-7), and the degenerate-dh reject (R3-6). The `round3_hardening_test.dart`
+  these findings reference was never created. Relay-side `prekeyLimiter` (R3-5)
+  likewise lacks `prekey_throttle_test.go`. Also still missing: malformed
   base64 *inside* the sealed inner; an end-to-end (real WS) integration test.
-  Sealed sender IS fully wired into send/receive (this was previously "not
-  wired").
+  (C2 NOW HAS a dedicated unit test — `test/c2_binding_test.dart`. Go-side CA
+  rotation IS tested — `sealed_ca_test.go`. Sealed sender is fully wired into
+  send/receive.)
 
 ## 8. Out of scope for this construction (documented elsewhere)
 
@@ -177,12 +186,12 @@ code + tests landed this session.
 | ID | Sev | Status | Disposition |
 |----|-----|--------|-------------|
 | R3-1 | HIGH | OPEN (architectural) | "Decouple the CA" is insufficient on its own: the relay also owns registration + the prekey directory, so a separate CA fed by relay-served bundles is still forgeable. The real fix moves the uid↔ik registration authority OFF the relay (a separate directory service), demoting the relay to a dumb pipe that cannot serve bundles. Not closeable in a patch — this is the headline agenda item for the external/architectural review. Interim mitigation landed: out-of-band CA pin (see R3-2) removes the relay's ability to be its own pinned authority for configured deployments. |
-| R3-2 | HIGH | **FIXED** | CA-rotation kill switch + no safe rotation path. (a) Client now accepts a changed CA key ONLY if the `/sealed-ca` response carries a rotation proof — `prev_public_key` == the pinned key AND `rotation_sig` = Ed25519(oldPriv, newPub) verifies under the pinned key (`SealedCaService._rotationProofValid`); an unsigned change still fails closed. Relay mints the proof from a `<path>.prev` file (`SealedCA` rotation, `/sealed-ca` serves it). (b) Out-of-band CA pin via `--dart-define=SPECTRE_SEALED_CA=domain:b64` (`SealedCaService.parseOobPins`, wired in `main.dart`): an OOB-pinned domain never TOFU-trusts the relay and a served key that disagrees fails closed. Tests: `sealed_ca_test.go` (signed rotation: proof verifies under old key, NOT under new key, stable across reload), `round3_hardening_test.dart` (OOB pin parsing). |
+| R3-2 | HIGH | **FIXED** | CA-rotation kill switch + no safe rotation path. (a) Client now accepts a changed CA key ONLY if the `/sealed-ca` response carries a rotation proof — `prev_public_key` == the pinned key AND `rotation_sig` = Ed25519(oldPriv, newPub) verifies under the pinned key (`SealedCaService._rotationProofValid`); an unsigned change still fails closed. Relay mints the proof from a `<path>.prev` file (`SealedCA` rotation, `/sealed-ca` serves it). (b) Out-of-band CA pin via `--dart-define=SPECTRE_SEALED_CA=domain:b64` (`SealedCaService.parseOobPins`, wired in `main.dart`): an OOB-pinned domain never TOFU-trusts the relay and a served key that disagrees fails closed. Tests: `sealed_ca_test.go` (`TestSealedCASignedRotation`: proof verifies under old key, NOT under new key, stable across reload) — **Go side covered. DART SIDE NOT YET TESTED:** the `round3_hardening_test.dart` referenced here (OOB-pin parsing, `_rotationProofValid`) was never created; `SealedCaService` rotation/OOB logic is currently unit-test-uncovered. |
 | R3-3 | HIGH | PARTIAL (UI done, arch open) | Verification-before-attribution. The UI side is largely in place from NEW-HIGH-1: unverified state renders in danger-red as "sender identity is a relay claim", first-contact is a loud non-dismissible-as-trusted banner, key-change is sticky red. STILL the architectural residual of R3-1: first-contact MITM is undetectable in-band (same as Signal); only out-of-band safety-number compare anchors trust. Making verification strictly MANDATORY before any "secure" affordance (vs. reachable) is the remaining UX-rigor item. |
-| R3-4 | MED | **FIXED** | First-contact size oracle. Sealed inner is now length-prefixed and zero-padded to a 1024-byte bucket before AEAD (`SealedSender._padInner`/`_unpadInner`), so a first-contact PreKey envelope and an established-session Whisper envelope are not size-distinguishable up to the bucket. Test: `round3_hardening_test.dart` (two small inners → equal blob length; round-trip; bucket-multiple overflow). |
-| R3-5 | MED | **FIXED** | Unauthenticated OTPK drain → forward-secrecy downgrade. `/prekeys/{id}` is now per-TARGET rate-limited; over budget it serves the static bundle WITHOUT consuming an OTPK — byte-shape-identical to the legitimate exhausted fallback, so no new oracle (`prekeyLimiter`, `getBundleWithOTPK`). Test: `prekey_throttle_test.go`. |
+| R3-4 | MED | **FIXED** | First-contact size oracle. Sealed inner is now length-prefixed and zero-padded to a 1024-byte bucket before AEAD (`SealedSender._padInner`/`_unpadInner`), so a first-contact PreKey envelope and an established-session Whisper envelope are not size-distinguishable up to the bucket. **TEST NOT YET WRITTEN:** the `round3_hardening_test.dart` referenced here (`_padInner`/`_unpadInner` round-trip, two small inners → equal blob length, bucket-multiple overflow) was never created. `sealed_sender_test.dart` only uses a local padding helper to build the H4-commitment test inputs — it does not test the padding logic itself. |
+| R3-5 | MED | **FIXED** | Unauthenticated OTPK drain → forward-secrecy downgrade. `/prekeys/{id}` is now per-TARGET rate-limited; over budget it serves the static bundle WITHOUT consuming an OTPK — byte-shape-identical to the legitimate exhausted fallback, so no new oracle (`prekeyLimiter`, `getBundleWithOTPK` in server.go / prekey_store.go). **TEST NOT YET WRITTEN:** the `prekey_throttle_test.go` referenced here was never created; the throttle path is currently unit-test-uncovered. |
 | R3-6 | MED | **FIXED** | The outer AEAD is NOT an unconditional "auth gate": the libsignal-java-lineage `Curve.calculateAgreement` does not reject the all-zero/small-order result. `_deriveKey` now rejects an all-zero `dh` (constant-time) and the doc comments were corrected to state the outer layer is recipient-bound confidentiality, with the inner cert+ratchet as the actual authentication. |
-| R3-7 | MED | **FIXED (detection)** | Hash dedup ≠ stream integrity — a relay can silently drop/withhold/reorder. Added a per-conversation monotonic sequence carried INSIDE the E2E payload (`{v:1,...,s:<seq>}`), claimed atomically per send (`claimNextOutboundSeq`), with forward-gap detection on receive (`decideSeqGap`, schema v5 `lastInboundSeq`). A gap surfaces a sticky `_SuppressionGapBanner` (decay-red, distinct from impersonation-red). Detection only — the dropped message cannot be recovered. Test: `round3_hardening_test.dart` (in-order / gap / off-by-one / reorder / legacy-seqless). |
+| R3-7 | MED | **FIXED (detection)** | Hash dedup ≠ stream integrity — a relay can silently drop/withhold/reorder. Added a per-conversation monotonic sequence carried INSIDE the E2E payload (`{v:1,...,s:<seq>}`), claimed atomically per send (`claimNextOutboundSeq`), with forward-gap detection on receive (`decideSeqGap`, schema v5 `lastInboundSeq`). A gap surfaces a sticky `_SuppressionGapBanner` (decay-red, distinct from impersonation-red). Detection only — the dropped message cannot be recovered. **TEST NOT YET WRITTEN:** the `round3_hardening_test.dart` referenced here (`decideSeqGap`: in-order / gap / off-by-one / reorder / legacy-seqless) was never created; `decideSeqGap`/`claimNextOutboundSeq` are currently unit-test-uncovered. |
 | R3-8 | LOW | NOTE | H4's transcript commitment is a transcript check, not AEAD key-commitment — true, and key-commitment isn't needed in this 1:1 receiver-derives-key model. Docs no longer claim it addresses non-committing AEAD; its value is cert-envelope binding. |
 | R3-9 | LOW | NOTE | Cert `exp` is near-vestigial (cert rides confidentially inside the AEAD; relay-as-CA can re-mint), so the H2 "device-clock residual" is correctly LOW, not blocking. |
 | R3-10 | LOW | NOTE | The raw-32 vs 0x05-tagged representation of eph_pub/recip_pub in the HKDF IKM is exercised by the seal→open round-trip + the Go→Dart golden vector; a silent representation mismatch fails closed (AEAD won't decrypt) and never "tries both". |
